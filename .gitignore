@@ -1,0 +1,55 @@
+# ==========================================
+# ROS 2 & Build Artifacts
+# ==========================================
+build/
+install/
+log/
+.colcon/
+
+# ==========================================
+# Simulator & External Packages
+# ==========================================
+src/f1tenth_gym_ros/
+f1tenth_gym_ros/
+
+# ==========================================
+# Python Caches & Environments
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.pytest_cache/
+*.egg-info/
+.eggs/
+
+# ==========================================
+# Datasets & Large Data (Ignore Datasets)
+# ==========================================
+datasets/
+**/datasets/
+*.csv
+# Ngoại lệ: Không ignore các file waypoint raceline quan trọng
+!**/racelines/*.csv
+!**/*waypoint*.csv
+
+# Reports & Logs
+ai_eval_log.csv
+ai_eval_report.html
+
+# ==========================================
+# IDE & System Files
+# ==========================================
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+.DS_Store
+.gemini/
+
+# Lưu ý: Thư mục models/ (chứa .onnx, .pth, .json) được giữ lại để đẩy lên GitHub

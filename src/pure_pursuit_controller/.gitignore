@@ -1,0 +1,18 @@
+# ==========================================
+# Python Caches
+# ==========================================
+__pycache__/
+*.py[cod]
+
+# ==========================================
+# Ignore Datasets
+# ==========================================
+datasets/
+*.csv
+!**/*waypoint*.csv
+
+# Reports & Logs
+ai_eval_log.csv
+ai_eval_report.html
+
+# Note: models/ folder (.onnx, .pth, .json) is KEPT for git
