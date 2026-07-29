@@ -27,7 +27,7 @@ class ContinuousLocalPlanner(Node):
         # ==========================================
         # 1. PARAMETERS
         # ==========================================
-        self.declare_parameter("waypoint_path", "/home/adt/f1_ws/install/waypoint/share/waypoint/f1tenth_waypoint_generator/racelines/f1tenth_waypoint.csv")
+        self.declare_parameter("waypoint_path", "/home/danh/ros2_ws/f1tenth_waypoint.csv")
         self.declare_parameter("lookahead_global", 2.0) 
         self.declare_parameter("max_speed", 1.0)
         self.declare_parameter("scan_topic", "/scan")

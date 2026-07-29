@@ -40,6 +40,7 @@ class CbfSafetyFilterNode(Node):
         self.declare_parameter('steer_max', 0.41)       # Góc lái tối đa (rad)
         self.declare_parameter('slack_weight', 1e4)     # Trọng số Slack variable
         self.declare_parameter('num_danger_rays', 15)   # Số tia LiDAR nguy hiểm nhất
+        self.declare_parameter('fov_cutoff_deg', 75.0)  # Góc quét phía trước xét vật cản (+/- độ)
         self.declare_parameter('input_drive_topic', '/drive_raw')
         self.declare_parameter('output_drive_topic', '/drive')
         self.declare_parameter('scan_topic', 'scan_raw')
@@ -50,6 +51,7 @@ class CbfSafetyFilterNode(Node):
         self.steer_max = self.get_parameter('steer_max').value
         self.slack_weight = self.get_parameter('slack_weight').value
         self.num_danger_rays = self.get_parameter('num_danger_rays').value
+        self.fov_cutoff_deg = self.get_parameter('fov_cutoff_deg').value
         self.input_drive_topic = self.get_parameter('input_drive_topic').value
         self.output_drive_topic = self.get_parameter('output_drive_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
@@ -61,7 +63,8 @@ class CbfSafetyFilterNode(Node):
             v_max=self.v_max,
             steer_max=self.steer_max,
             slack_weight=self.slack_weight,
-            num_danger_rays=self.num_danger_rays
+            num_danger_rays=self.num_danger_rays,
+            fov_cutoff_deg=self.fov_cutoff_deg
         )
 
         # State
