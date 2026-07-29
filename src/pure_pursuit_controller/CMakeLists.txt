@@ -19,6 +19,7 @@ install(PROGRAMS
   pure_pursuit_controller/controllers/ai_inference_sim_override.py
   pure_pursuit_controller/controllers/claude_inference.py
   pure_pursuit_controller/controllers/mppi_basic.py
+  pure_pursuit_controller/controllers/ai_safe_controller_jetson.py
 
   # AI Inference
   pure_pursuit_controller/ai_inference/ai_inference_sim.py
@@ -26,6 +27,7 @@ install(PROGRAMS
   pure_pursuit_controller/ai_inference/ai_inference_real.py
   pure_pursuit_controller/ai_inference/ai_inference_real_pytorch.py
   pure_pursuit_controller/ai_inference/dagger_inference_sim.py
+  pure_pursuit_controller/ai_inference/dagger_inference_real_pytorch.py
 
   # Data Collection
   pure_pursuit_controller/data_collection/data_collection_sim.py
@@ -51,6 +53,7 @@ install(PROGRAMS
   pure_pursuit_controller/training/steering_logger.py
   pure_pursuit_controller/training/visualize_steering.py
   pure_pursuit_controller/training/downOnnx.py
+  pure_pursuit_controller/sync_sim_pose.py
 
   # RRT Planner
   rrt_planner/rrt.py
@@ -62,6 +65,7 @@ install(PROGRAMS
   rrt_planner/improved_hybrid_planner_sim.py
   rrt_planner/smart_pure_pursuit.py
   rrt_planner/code_chay_reak.py
+  rrt_planner/rrt_expert_relay_node.py
   DESTINATION lib/${PROJECT_NAME})  
 
 if(BUILD_TESTING)

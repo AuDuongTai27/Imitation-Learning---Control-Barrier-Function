@@ -33,7 +33,7 @@ class DataCollectionRealNode(Node):
         home_dir = os.path.expanduser('~')
         default_dataset_path = os.path.join(
             home_dir, 
-            'f1_ws/src/pure_pursuit_controller/pure_pursuit_controller/dagger_dataset_real.csv'
+            'f1_ws/src/pure_pursuit_controller/pure_pursuit_controller/dagger_dataset_real_2.csv'
         )
 
         self.declare_parameter('dataset_path', default_dataset_path)

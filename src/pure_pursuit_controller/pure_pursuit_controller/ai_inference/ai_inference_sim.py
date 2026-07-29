@@ -50,7 +50,7 @@ class AiInferenceSimNode(Node):
         super().__init__('ai_inference_sim_node')
 
         # --- 1. Parameters ---
-        default_model = '/sim_ws/src/pure_pursuit_controller/pure_pursuit_controller/models/rrt_2.onnx'
+        default_model = '/sim_ws/src/pure_pursuit_controller/pure_pursuit_controller/models/combined_rrt_dagger.onnx'
         if not os.path.exists(default_model):
             default_model = resolve_model_path(default_model)
 
@@ -59,7 +59,7 @@ class AiInferenceSimNode(Node):
         self.declare_parameter('ai_speed', 10.0)           # Vận tốc tối đa của AI (m/s)
         self.declare_parameter('max_range', 10.0)
         self.declare_parameter('drive_topic', '/drive')
-        self.declare_parameter('scan_topic', 'scan_raw')
+        self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('speed_scale', 1.0)        # Tỷ lệ nhân tốc độ (vd: 1.5 = tăng 50%)
         self.declare_parameter('fixed_speed', 0.0)        # Nếu > 0, ép tốc độ chạy cố định (vd: 5.5 m/s)
 
