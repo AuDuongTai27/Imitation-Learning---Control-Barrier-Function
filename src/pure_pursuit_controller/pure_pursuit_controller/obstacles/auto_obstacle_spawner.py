@@ -59,6 +59,7 @@ class AutoObstacleSpawnerNode(Node):
 
         # ── [TUNING] Bán kính obstacle (m) ───────────────────────────────
         self.declare_parameter('obstacle_radius', 0.20)
+        self.declare_parameter('mode', 0)
 
         self.declare_parameter('odom_topic', '/ego_racecar/odom')
         self.declare_parameter('scan_raw_topic', '/scan_raw')
@@ -68,13 +69,33 @@ class AutoObstacleSpawnerNode(Node):
         self.spawn_dist    = self.get_parameter('spawn_distance_ahead').value
         self.max_offset    = self.get_parameter('max_perpendicular_offset').value
         self.obs_radius    = self.get_parameter('obstacle_radius').value
+        self.spawn_mode    = self.get_parameter('mode').value
         odom_topic         = self.get_parameter('odom_topic').value
         scan_raw_topic     = self.get_parameter('scan_raw_topic').value
+
+        # 🚀 Nếu chưa truyền parameter -p mode:=1/2, hiển thị prompt hỏi người dùng nhập từ Terminal
+        if self.spawn_mode not in [1, 2]:
+            print("\n" + "="*55)
+            print(" 🎯 CHỌN CHẾ ĐỘ SPAWN VẬT CẢN (OBSTACLE MODE):")
+            print("  [1] - Chỉ sinh 1 Khối trụ đơn (Single Cylinder)")
+            print("  [2] - Sinh Đa dạng vật cản (Khối trụ, Tường ngang, Tường dọc)")
+            print("="*55)
+            try:
+                user_in = input("👉 Nhập lựa chọn của bạn (1 hoặc 2) [Mặc định: 2]: ").strip()
+                if user_in == "1":
+                    self.spawn_mode = 1
+                else:
+                    self.spawn_mode = 2
+            except Exception:
+                self.spawn_mode = 2
+
+        mode_desc = "1 KHỐI TRỤ ĐƠN" if self.spawn_mode == 1 else "ĐA DẠNG (TRỤ + TƯỜNG)"
+        self.get_logger().info(f"👉 ĐÃ KÍCH HOẠT SPAWN MODE: [{self.spawn_mode}] - {mode_desc}")
 
         # ── State ────────────────────────────────────────────────────────
         self.car_x = 0.0
         self.car_y = 0.0
-        self.obs_circles = []  # List của các (x, y, radius) biểu diễn vật cản (dạng trụ đơn hoặc bức tường)
+        self.obs_circles = []  # List của các (x, y, radius) biểu diễn vật cản
         self.obs_type_name = "CYLINDER"
         self.obs_active = False
         self._initial_spawned = False
@@ -86,7 +107,6 @@ class AutoObstacleSpawnerNode(Node):
 
         # ── Pub / Sub ────────────────────────────────────────────────────
         self.marker_pub = self.create_publisher(Marker, '/sim_obstacle', 10)
-        # 🚀 CHÚ Ý: Sub từ /scan_raw và Publish ra /scan để các node tự lái nhìn thấy được!
         self.scan_pub   = self.create_publisher(LaserScan, '/scan', 10)
 
         self.create_subscription(Odometry, odom_topic, self.odom_callback, 10)
@@ -122,7 +142,7 @@ class AutoObstacleSpawnerNode(Node):
                 self._respawn_obstacle()
 
     def scan_callback(self, msg: LaserScan):
-        """Nhận scan thô, chèn obstacle ảo (dạng trụ đơn hoặc cụm/bức tường) vào, publish lên /scan."""
+        """Nhận scan thô, chèn obstacle ảo vào, publish lên /scan."""
         if not self.obs_active or len(self.obs_circles) == 0:
             self.scan_pub.publish(msg)
             return
@@ -131,25 +151,20 @@ class AutoObstacleSpawnerNode(Node):
         angles = np.arange(len(ranges)) * msg.angle_increment + msg.angle_min
 
         try:
-            # Tra cứu transform từ map sang laser frame chuẩn TF2
             tf = self.tf_buffer.lookup_transform(
                 msg.header.frame_id, 'map', rclpy.time.Time())
             
-            # Quay & Tịnh tiến chuẩn matrix 2D: P_laser = R_map_to_laser * (P_map - T_laser_in_map)
-            tx = transform_tx = tf.transform.translation.x
-            ty = transform_ty = tf.transform.translation.y
+            tx = tf.transform.translation.x
+            ty = tf.transform.translation.y
             q = tf.transform.rotation
             siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
             cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
             yaw = math.atan2(siny_cosp, cosy_cosp)
 
-            # Lặp qua tất cả các hình trụ cấu thành vật cản
             for (cx, cy, r_obs) in self.obs_circles:
-                # Biến đổi tọa độ chính xác: ox_laser, oy_laser trong hệ tọa độ cảm biến LiDAR
                 ox = math.cos(yaw) * cx - math.sin(yaw) * cy + tx
                 oy = math.sin(yaw) * cx + math.cos(yaw) * cy + ty
 
-                # Giao cắt tia Laser – Hình tròn
                 cos_a = np.cos(angles)
                 sin_a = np.sin(angles)
                 b     = -2.0 * (ox * cos_a + oy * sin_a)
@@ -164,7 +179,6 @@ class AutoObstacleSpawnerNode(Node):
                     t_hit  = np.minimum(t1, t2)
                     orig   = ranges[mask]
                     
-                    # Chỉ cập nhật các tia cắt trúng phía trước laser (t_hit > 0.01m)
                     update_mask = (t_hit > 0.01) & (t_hit < orig)
                     ranges[mask] = np.where(update_mask, t_hit, orig)
 
@@ -176,7 +190,7 @@ class AutoObstacleSpawnerNode(Node):
         self.scan_pub.publish(out)
 
     # ═══════════════════════════════════════════════════════════════════
-    #  SPAWN LOGIC (ĐÃ NÂNG CẤP DỄ HƠN DỄ NÉ HƠN)
+    #  SPAWN LOGIC (HỖ TRỢ MODE 1 & MODE 2)
     # ═══════════════════════════════════════════════════════════════════
 
     def _try_initial_spawn(self):
@@ -232,21 +246,26 @@ class AutoObstacleSpawnerNode(Node):
         center_x = wp[0] + perp_x * base_offset
         center_y = wp[1] + perp_y * base_offset
 
-        # 5. 🚀 RANDOM LOẠI VẬT CẢN (ƯU TIÊN 60% TRỤ ĐƠN DỄ NÉ)
-        obs_type = random.choices(
-            ["SINGLE_CYLINDER", "WALL_TRANSVERSE", "WALL_LONGITUDINAL"],
-            weights=[0.6, 0.2, 0.2]
-        )[0]
+        # 5. 🚀 CHỌN LOẠI VẬT CẢN DỰA TRÊN SPAWN MODE
+        if self.spawn_mode == 1:
+            # Mode 1: Luôn luôn chỉ sinh 1 Khối hình trụ đơn
+            obs_type = "SINGLE_CYLINDER"
+        else:
+            # Mode 2: Sinh đa dạng vật cản (60% trụ đơn, 20% tường ngang, 20% tường dọc)
+            obs_type = random.choices(
+                ["SINGLE_CYLINDER", "WALL_TRANSVERSE", "WALL_LONGITUDINAL"],
+                weights=[0.6, 0.2, 0.2]
+            )[0]
+
         self.obs_circles = []
 
         if obs_type == "SINGLE_CYLINDER":
-            self.obs_type_name = "HÌNH TRỤ ĐƠN (DỄ)"
-            r = random.uniform(0.18, 0.22)  # Bán kính nhỏ 20cm
+            self.obs_type_name = "HÌNH TRỤ ĐƠN"
+            r = random.uniform(0.18, 0.22)
             self.obs_circles.append((center_x, center_y, r))
 
         elif obs_type == "WALL_TRANSVERSE":
             self.obs_type_name = "BỨC TƯỜNG NGANG VỪA"
-            # Rào chắn vừa rộng ~0.5m
             r_wall = 0.12
             for step in [-0.15, 0.0, 0.15]:
                 wx = center_x + perp_x * step
@@ -255,7 +274,6 @@ class AutoObstacleSpawnerNode(Node):
 
         elif obs_type == "WALL_LONGITUDINAL":
             self.obs_type_name = "BỨC TƯỜNG DỌC VỪA"
-            # Rào chắn dọc rộng ~0.5m
             r_wall = 0.12
             for step in [-0.15, 0.0, 0.15]:
                 wx = center_x + dx * step

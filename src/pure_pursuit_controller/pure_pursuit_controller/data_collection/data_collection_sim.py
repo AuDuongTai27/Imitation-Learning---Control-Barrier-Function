@@ -27,7 +27,7 @@ class DataCollectionSimNode(Node):
         super().__init__('data_collection_sim_node')
 
         # --- 1. Parameters ---
-        self.declare_parameter('dataset_path', '/sim_ws/src/pure_pursuit_controller/pure_pursuit_controller/rrt_2.csv')
+        self.declare_parameter('dataset_path', '/sim_ws/src/pure_pursuit_controller/pure_pursuit_controller/datasets/rrt_5.csv')
         self.declare_parameter('target_beams', 60)
         self.declare_parameter('buffer_size', 50)
         self.declare_parameter('max_range', 10.0)
@@ -45,6 +45,7 @@ class DataCollectionSimNode(Node):
         self.latest_drive_time = 0.0
         
         self.buffer = []
+        self.is_recording = True  # Mặc định tự động ghi dữ liệu liên tục
         self.lock = threading.Lock()
         self.total_saved_samples = 0
 
@@ -52,14 +53,22 @@ class DataCollectionSimNode(Node):
         if not os.path.exists(self.dataset_path):
             self._write_header()
 
-        # --- 3. Pub/Sub ---
+        # --- 3. Pub/Sub & Key Listener ---
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.drive_sub = self.create_subscription(AckermannDriveStamped, '/drive', self.drive_callback, 10)
+
+        # 🚀 Khởi chạy luồng phụ lắng nghe phím điều khiển từ Terminal
+        threading.Thread(target=self._listen_keyboard, daemon=True).start()
 
         self.get_logger().info("=========================================")
         self.get_logger().info(" DATA COLLECTION SIM NODE STARTED")
         self.get_logger().info(f" Dataset Path: {self.dataset_path}")
         self.get_logger().info(f" Target Beams: {self.target_beams} | Buffer Size: {self.buffer_size}")
+        self.get_logger().info(" ⌨️  PHÍM BẮM ĐIỀU KHIỂN TERMINAL:")
+        self.get_logger().info("     - Ấn 'x' : XÓA 1000 MẪU GẦN NHẤT & Tiếp tục thu thập")
+        self.get_logger().info("     - Ấn 'p' : TẠM DỪNG thu thập dữ liệu (Pause)")
+        self.get_logger().info("     - Ấn 'r' / Space : TIẾP TỤC thu thập dữ liệu (Resume)")
+        self.get_logger().info("     - Ctrl + C : DỪNG VÀ THOÁT NODE")
         self.get_logger().info("=========================================")
 
     def _write_header(self):
@@ -80,6 +89,10 @@ class DataCollectionSimNode(Node):
         """Xử lý scan, đồng bộ hóa và lưu vào buffer"""
         now = time.monotonic()
         
+        # Nếu đang ở trạng thái TẠM DỪNG (Pause), bỏ qua không ghi
+        if not self.is_recording:
+            return
+
         # Kiểm tra sự tồn tại và tính hợp lệ thời gian của lệnh lái (không quá 0.5 giây)
         with self.lock:
             if self.latest_drive is None or (now - self.latest_drive_time) > 0.5:
@@ -150,6 +163,80 @@ class DataCollectionSimNode(Node):
             self.get_logger().info(f"[SIM] Flushed {len(data_list)} samples to CSV. Total samples: {self.total_saved_samples}")
         except Exception as e:
             self.get_logger().error(f"Error while flushing buffer to CSV: {e}")
+
+    def _listen_keyboard(self):
+        """Luồng phụ lắng nghe phím điều khiển 'x', 'p', 'r', Space từ Terminal"""
+        import sys, select, tty, termios
+        try:
+            old_settings = termios.tcgetattr(sys.stdin)
+        except Exception:
+            return  # Không thuộc môi trường terminal TTY tương tác
+
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            while rclpy.ok():
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    key = sys.stdin.read(1)
+                    k = key.lower()
+                    if k == 'x':
+                        self.delete_recent_samples(1000)
+                    elif k == 'p':
+                        self.is_recording = False
+                        print(f"\n⏸️  [PAUSE] ĐÃ TẠM DỪNG THU THẬP DỮ LIỆU. (Ấn 'r' hoặc Space để tiếp tục)\n")
+                    elif k == 'r' or key == ' ':
+                        self.is_recording = True
+                        print(f"\n▶️  [RESUME] TIẾP TỤC THU THẬP DỮ LIỆU...\n")
+                time.sleep(0.02)
+        except Exception:
+            pass
+        finally:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
+
+    def delete_recent_samples(self, n=1000):
+        """Xóa n mẫu dữ liệu gần nhất trong CSV và dọn sạch bộ đệm RAM chưa ghi"""
+        with self.lock:
+            buffered_count = len(self.buffer)
+            self.buffer.clear()
+
+            if not os.path.exists(self.dataset_path):
+                self.get_logger().warn(f"File {self.dataset_path} chưa tồn tại!")
+                return
+
+            try:
+                with open(self.dataset_path, 'r', newline='') as f:
+                    reader = list(csv.reader(f))
+
+                if len(reader) <= 1:
+                    self.get_logger().warn("File CSV rỗng hoặc chỉ chứa Header, không có dữ liệu để xóa!")
+                    return
+
+                header = reader[0]
+                data_rows = reader[1:]
+                total_rows = len(data_rows)
+
+                rows_to_remove = min(n, total_rows)
+                remaining_rows = data_rows[:-rows_to_remove] if rows_to_remove < total_rows else []
+
+                with open(self.dataset_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(header)
+                    writer.writerows(remaining_rows)
+
+                self.total_saved_samples = len(remaining_rows)
+                deleted_total = rows_to_remove + buffered_count
+
+                print(
+                    f"\n{'='*60}\n"
+                    f" ⚠️ ĐÃ XÓA THÀNH CÔNG {deleted_total} MẪU DỮ LIỆU GẦN NHẤT!\n"
+                    f" 🗑️  Đã xóa từ đĩa CSV: {rows_to_remove} mẫu | Đã dọn RAM buffer: {buffered_count} mẫu\n"
+                    f" 📊  Tổng số mẫu còn lại trong CSV: {len(remaining_rows)}\n"
+                    f"{'='*60}\n"
+                )
+            except Exception as e:
+                self.get_logger().error(f"Lỗi khi xóa mẫu dữ liệu từ CSV: {e}")
 
 def main(args=None):
     rclpy.init(args=args)

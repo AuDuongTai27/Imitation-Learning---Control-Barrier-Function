@@ -112,24 +112,23 @@ class AiSafeDriveRealNode(Node):
 
         # ── AI ────────────────────────────────────────────────────
         self.declare_parameter('model_path',
-            os.path.join(current_dir, 'model_sim_5.pth'))
+            os.path.join(current_dir, 'combine_1.pth'))
         # [TUNING] Số beam — phải = input_dim khi train (60 hoặc 90)
         self.declare_parameter('target_beams', 60)
         # [TUNING] Tốc độ tối đa của AI (m/s) — khuyến nghị bắt đầu ≤ 1.0
-        self.declare_parameter('ai_speed', 0.8)
+        self.declare_parameter('ai_speed', 1.0)
         self.declare_parameter('max_range', 10.0)
         # [TUNING] Giới hạn vật lý góc lái AI (rad)
         self.declare_parameter('max_steering_ai', 0.35)
 
         # ── Pure Pursuit Expert ───────────────────────────────────
         self.declare_parameter('waypoint_path',
-            '/home/adt/f1_ws/install/waypoint/share/waypoint/'
-            'f1tenth_waypoint_generator/racelines/f1tenth_waypoint.csv')
+            '/home/fablab/Desktop/f1tenth_waypoint.csv')
         # [TUNING] Khoảng nhìn trước (m): tăng = mượt hơn, giảm = bám sát hơn
         self.declare_parameter('lookahead_dist', 1.0)
-        self.declare_parameter('wheelbase', 0.33)       # chiều dài cơ sở xe (m)
+        self.declare_parameter('wheelbase', 0.39)       # chiều dài cơ sở xe (m)
         # [TUNING] Tốc độ khi expert tiếp quản (m/s)
-        self.declare_parameter('expert_speed', 0.6)
+        self.declare_parameter('expert_speed', 1.0)
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
@@ -491,6 +490,75 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().warn("Shutting down — stopping car.")
         node._publish(0.0, 0.0, 'STOP')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()reprocess_scan(self, msg: LaserScan) -> np.ndarray:
+        ranges     = np.array(msg.ranges, dtype=np.float32)
+        crop_limit = math.radians(60.0)
+        angles     = np.arange(len(ranges)) * msg.angle_increment + msg.angle_min
+        mask       = (angles >= -crop_limit) & (angles <= crop_limit)
+
+        if not np.any(mask):
+            return np.full(self.target_beams, self.max_range, dtype=np.float32)
+
+        vr = ranges[mask]
+        va = angles[mask]
+        vr = np.where(np.isnan(vr) | np.isinf(vr), self.max_range, vr)
+        vr = np.clip(vr, 0.0, self.max_range)
+        return np.interp(
+            np.linspace(-crop_limit, crop_limit, self.target_beams), va, vr
+        ).astype(np.float32)
+
+    def _publish(self, steer: float, speed: float, mode: str):
+        msg = AckermannDriveStamped()
+        msg.header.stamp        = self.get_clock().now().to_msg()
+        msg.header.frame_id     = 'laser'
+        msg.drive.steering_angle = float(steer)
+        msg.drive.speed          = float(speed)
+        self.drive_pub.publish(msg)
+
+    def visualize(self, path_local, target_local):
+        ma = MarkerArray()
+        del_m = Marker(); del_m.action = Marker.DELETEALL; ma.markers.append(del_m)
+        path_m = Marker(); path_m.header.frame_id = self.base_frame; path_m.id = 0; path_m.type = Marker.LINE_STRIP; path_m.action = Marker.ADD
+        path_m.scale.x = 0.1; path_m.color.a = 1.0; path_m.color.g = 1.0; path_m.pose.orientation.w = 1.0
+        for pt in path_local:
+            p = Point(); p.x = pt[0]; p.y = pt[1]; p.z = 0.2; path_m.points.append(p)
+        ma.markers.append(path_m)
+        tgt_m = Marker(); tgt_m.header.frame_id = self.base_frame; tgt_m.id = 1; tgt_m.type = Marker.SPHERE; tgt_m.action = Marker.ADD
+        tgt_m.pose.position.x = target_local[0]; tgt_m.pose.position.y = target_local[1]; tgt_m.pose.position.z = 0.3
+        tgt_m.scale.x = 0.3; tgt_m.scale.y = 0.3; tgt_m.scale.z = 0.3; tgt_m.color.a = 1.0; tgt_m.color.r = 1.0; tgt_m.color.b = 0.0
+        ma.markers.append(tgt_m)
+        self.viz_pub.publish(ma)
+
+    def _log_startup(self):
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("  AI SAFE DRIVE WITH RRT* EXPERT (REAL VEHICLE) STARTED")
+        self.get_logger().info("  [SELF-CONTAINED STANDALONE FILE WITH FALLBACK]")
+        self.get_logger().info(f"  Model      : {self.model_path}")
+        self.get_logger().info(f"  Beams      : {self.target_beams}")
+        self.get_logger().info(f"  AI speed   : {self.ai_speed} m/s")
+        self.get_logger().info(f"  Expert RRT*: {self.expert_speed} m/s (Obstacle Margin: 0.35m)")
+        self.get_logger().info(f"  Threshold  : {math.degrees(self.override_threshold):.1f}° ({self.override_threshold:.3f} rad)")
+        self.get_logger().info(f"  DAgger Save: {self.enable_dagger} -> {self.dataset_path}")
+        self.get_logger().info(f"  Pre-Roll   : {self.pre_roll_secs} s history buffer")
+        self.get_logger().info("=" * 60)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = AiSafeDriveRealNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().warn("Shutting down — stopping car.")
+        node._publish(0.0, 0.0, 'STOP')
+        if node.enable_dagger and len(node.dagger_buffer) > 0:
+            node._flush_dagger_buffer(node.dagger_buffer)
     finally:
         node.destroy_node()
         rclpy.shutdown()
