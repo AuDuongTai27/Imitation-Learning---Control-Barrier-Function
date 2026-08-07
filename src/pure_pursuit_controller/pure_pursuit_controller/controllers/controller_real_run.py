@@ -17,7 +17,7 @@ class PurePursuit(Node):
     def __init__(self):
         super().__init__('pure_pursuit_real')
 
-        # ========== PARAMETERS ==========
+        # --- 1. Parameters ---
         self.declare_parameter("waypoint_path", "/home/adt/f1_ws/install/waypoint/share/waypoint/f1tenth_waypoint_generator/racelines/f1tenth_waypoint.csv")
         self.declare_parameter("lookahead_dist", 1.0)
         self.declare_parameter("wheelbase", 0.33)
@@ -36,15 +36,15 @@ class PurePursuit(Node):
         self.odom_topic = self.get_parameter("odom_topic").value
         self.drive_topic = self.get_parameter("drive_topic").value
 
-        # ========== TF BUFFER & LISTENER ==========
+        # --- 2. TF Buffer & Listener ---
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # ========== LOAD WAYPOINT ==========
+        # --- 3. Load Waypoints ---
         self.waypoints = self.load_waypoints(self.csv_path)
         self.last_idx = 0
 
-        # ========== PUB / SUB ==========
+        # --- 4. Pub / Sub ---
         self.create_subscription(
             Odometry,
             self.odom_topic,
@@ -67,15 +67,12 @@ class PurePursuit(Node):
         self.publish_static_path()
         self.get_logger().info("Pure Pursuit (REAL VEHICLE) READY")
 
-    # ================= CORE =================
-
     def load_waypoints(self, path):
         pts = []
         actual_path = path
 
-        # Nếu đường dẫn không tồn tại, thử tìm tự động trong các workspace ở thư mục Home hoặc Docker
         if not os.path.exists(actual_path):
-            self.get_logger().warn(f"Waypoint path '{path}' not found. Searching in candidate paths...")
+            self.get_logger().warn(f"Waypoint path '{path}' not found. Searching candidate paths...")
             home_dir = os.path.expanduser('~')
             
             is_docker = os.path.exists('/.dockerenv')
@@ -97,7 +94,7 @@ class PurePursuit(Node):
                     break
 
         if not os.path.exists(actual_path):
-            self.get_logger().error(f"Waypoint file not found anywhere! Checked: {path}")
+            self.get_logger().error(f"Waypoint file not found: {path}")
             return np.array([])
 
         with open(actual_path) as f:
@@ -111,7 +108,6 @@ class PurePursuit(Node):
         if len(self.waypoints) == 0:
             return
 
-        # Thử lấy vị trí thực tế của xe trong hệ tọa độ bản đồ (map -> base_link) qua TF
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.map_frame, self.base_frame, rclpy.time.Time())
@@ -122,9 +118,7 @@ class PurePursuit(Node):
                 2*(q.w*q.z + q.x*q.y),
                 1 - 2*(q.y*q.y + q.z*q.z)
             )
-            # self.get_logger().info(f"TF Pose: x={x:.2f}, y={y:.2f}", throttle_duration_sec=2.0)
         except Exception:
-            # Fallback nếu không có TF (ví dụ chưa chạy slam / localization): dùng trực tiếp odom thô
             x = msg.pose.pose.position.x
             y = msg.pose.pose.position.y
             q = msg.pose.pose.orientation
@@ -138,8 +132,6 @@ class PurePursuit(Node):
 
         self.publish_cmd(steering)
         self.publish_markers(target, x, y)
-
-    # ================= PURE PURSUIT =================
 
     def get_target_point(self, x, y):
         n = len(self.waypoints)
@@ -168,8 +160,6 @@ class PurePursuit(Node):
 
         return math.atan2(2 * self.wheelbase * y_local, ld**2)
 
-    # ================= OUTPUT =================
-
     def publish_cmd(self, angle):
         msg = AckermannDriveStamped()
         msg.drive.steering_angle = float(angle)
@@ -180,8 +170,6 @@ class PurePursuit(Node):
 
         msg.drive.speed = speed
         self.cmd_pub.publish(msg)
-
-    # ================= VISUAL =================
 
     def publish_static_path(self):
         if len(self.waypoints) == 0:
