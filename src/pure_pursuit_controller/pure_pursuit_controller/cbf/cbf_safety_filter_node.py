@@ -2,14 +2,7 @@
 """
 cbf_safety_filter_node.py
 ─────────────────────────
-ROS 2 Node chạy lọc an toàn thời gian thực CBF-QP cho xe F1TENTH.
-
-Subscribe:
-  - /drive_raw (ackermann_msgs/AckermannDriveStamped) : Lệnh điều khiển chưa qua lọc từ AI / Teleop
-  - /scan      (sensor_msgs/LaserScan)               : Dữ liệu cảm biến LiDAR
-
-Publish:
-  - /drive     (ackermann_msgs/AckermannDriveStamped) : Lệnh điều khiển an toàn đã qua lọc CBF-QP
+ROS 2 Node for real-time CBF-QP safety filtering on F1TENTH.
 """
 
 import math
@@ -33,13 +26,13 @@ class CbfSafetyFilterNode(Node):
     def __init__(self):
         super().__init__('cbf_safety_filter_node')
 
-        # --- 1. ROS 2 Parameters ---
-        self.declare_parameter('d_min', 0.1)           # Khoảng cách an toàn tối thiểu (m)
-        self.declare_parameter('gamma', 2.0)            # Hệ số CBF gain
-        self.declare_parameter('v_max', 3.0)            # Tốc độ tối đa (m/s)
-        self.declare_parameter('steer_max', 0.41)       # Góc lái tối đa (rad)
-        self.declare_parameter('slack_weight', 1e4)     # Trọng số Slack variable
-        self.declare_parameter('num_danger_rays', 15)   # Số tia LiDAR nguy hiểm nhất
+        # --- 1. Parameters ---
+        self.declare_parameter('d_min', 0.1)           # Minimum safety distance (m)
+        self.declare_parameter('gamma', 2.0)            # CBF gain parameter
+        self.declare_parameter('v_max', 3.0)            # Max speed (m/s)
+        self.declare_parameter('steer_max', 0.41)       # Max steering angle (rad)
+        self.declare_parameter('slack_weight', 1e4)     # Slack weight
+        self.declare_parameter('num_danger_rays', 15)   # Number of danger LiDAR rays
         self.declare_parameter('input_drive_topic', '/drive_raw')
         self.declare_parameter('output_drive_topic', '/drive')
         self.declare_parameter('scan_topic', 'scan_raw')
@@ -64,7 +57,6 @@ class CbfSafetyFilterNode(Node):
             num_danger_rays=self.num_danger_rays
         )
 
-        # State
         self.latest_scan = None
 
         # --- 3. Pub / Sub ---
@@ -95,26 +87,20 @@ class CbfSafetyFilterNode(Node):
         self.get_logger().info("=========================================")
 
     def scan_callback(self, msg: LaserScan):
-        """Lưu trữ scan LiDAR gần nhất"""
         self.latest_scan = msg
 
     def drive_raw_callback(self, msg: AckermannDriveStamped):
-        """Nhận lệnh thô u_nominal, lọc qua CBF-QP và phát lệnh u_safe"""
         u_nom = np.array([msg.drive.speed, msg.drive.steering_angle], dtype=np.float32)
 
         if self.latest_scan is None:
-            # Chưa nhận được LiDAR -> Forward thẳng lệnh thô
             self.publish_drive(u_nom[0], u_nom[1])
             return
 
-        # 1. Trích xuất khoảng cách và góc của các tia LiDAR
         ranges = np.array(self.latest_scan.ranges, dtype=np.float32)
         angles = np.arange(len(ranges), dtype=np.float32) * self.latest_scan.angle_increment + self.latest_scan.angle_min
 
-        # 2. Giải lọc an toàn qua CBF-QP
         u_safe = self.cbf_filter.filter(u_nom, ranges, angles)
 
-        # Log khi CBF can thiệp bẻ lái/phanh khác với AI
         if abs(u_safe[0] - u_nom[0]) > 0.05 or abs(u_safe[1] - u_nom[1]) > 0.05:
             self.get_logger().warn(
                 f"[CBF INTERVENTION] Raw: v={u_nom[0]:.2f}, steer={math.degrees(u_nom[1]):.1f}° | "
@@ -122,7 +108,6 @@ class CbfSafetyFilterNode(Node):
                 throttle_duration_sec=0.5
             )
 
-        # 3. Publish tin nhắn an toàn
         self.publish_drive(u_safe[0], u_safe[1])
 
     def publish_drive(self, speed: float, steering_angle: float):
@@ -145,7 +130,6 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
