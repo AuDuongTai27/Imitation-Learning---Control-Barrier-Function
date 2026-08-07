@@ -2,16 +2,7 @@
 """
 ai_inference_sim.py
 ───────────────────
-ROS 2 Node chạy Suy luận mô hình AI tự lái thuần túy (Autonomous Only) bằng ONNX Runtime.
-Không thực hiện ghi đè từ chuyên gia (No override) và không thu thập dữ liệu DAgger.
-
-Logic:
-  1. Đọc và giải mã dữ liệu LiDAR từ `/scan`, tiền xử lý về 60 beams.
-  2. Suy luận qua mô hình ONNX để dự đoán [tốc độ, góc lái].
-     (Model ONNX này được export bằng export_onnx.py / DeployWrapper, nên đã tự
-     chuẩn hóa input và denormalize output bên trong đồ thị -> KHÔNG cần tự
-     chia/nhân lại ở đây. input_name = 'lidar_raw' là dấu hiệu nhận biết.)
-  3. Publish lệnh điều khiển trực tiếp tới `/drive`.
+ROS 2 Node for autonomous AI inference in simulation using ONNX Runtime.
 """
 
 import os
@@ -56,12 +47,12 @@ class AiInferenceSimNode(Node):
 
         self.declare_parameter('model_path', default_model)
         self.declare_parameter('target_beams', 60)
-        self.declare_parameter('ai_speed', 10.0)           # Vận tốc tối đa của AI (m/s)
+        self.declare_parameter('ai_speed', 10.0)           # Max AI speed (m/s)
         self.declare_parameter('max_range', 10.0)
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('speed_scale', 1.0)        # Tỷ lệ nhân tốc độ (vd: 1.5 = tăng 50%)
-        self.declare_parameter('fixed_speed', 0.0)        # Nếu > 0, ép tốc độ chạy cố định (vd: 5.5 m/s)
+        self.declare_parameter('speed_scale', 1.0)
+        self.declare_parameter('fixed_speed', 0.0)
 
         self.model_path = resolve_model_path(self.get_parameter('model_path').value)
         self.target_beams = self.get_parameter('target_beams').value
@@ -78,7 +69,6 @@ class AiInferenceSimNode(Node):
         self.target_mean = None
         self.target_std = None
 
-        # Tự động tìm file lưu tham số chuẩn hóa nếu có
         norm_path = os.path.splitext(self.model_path)[0] + '_norm.json'
         if os.path.exists(norm_path):
             try:
@@ -97,18 +87,12 @@ class AiInferenceSimNode(Node):
                     self.ort_session = ort.InferenceSession(self.model_path)
                     self.input_name = self.ort_session.get_inputs()[0].name
                     self.get_logger().info(f"Successfully loaded ONNX model from {self.model_path} (input: '{self.input_name}')")
-                    if self.input_name != 'lidar_raw':
-                        self.get_logger().warn(
-                            f"Input name '{self.input_name}' != 'lidar_raw'. Model này có thể KHÔNG "
-                            f"phải export bằng DeployWrapper (export_onnx.py) -> Sẽ tự chuẩn hóa "
-                            f"đầu vào và giải chuẩn hóa (denormalize) đầu ra trong code Python."
-                        )
                 except Exception as e:
                     self.get_logger().error(f"Failed to load ONNX model: {e}")
             else:
                 self.get_logger().warn(f"ONNX Model file not found at {self.model_path} or invalid format.")
         else:
-            self.get_logger().error("ONNX Runtime is not installed. Install it with: pip install onnxruntime")
+            self.get_logger().error("ONNX Runtime is not installed.")
 
         # --- 3. Pub/Sub ---
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
@@ -121,25 +105,19 @@ class AiInferenceSimNode(Node):
         self.get_logger().info("=========================================")
 
     def scan_callback(self, msg: LaserScan):
-        """Xử lý LiDAR, suy luận qua mạng AI và điều khiển xe"""
         if self.ort_session is None:
-            # Nếu chưa có model, dừng xe
             self.publish_drive(0.0, 0.0)
             self.get_logger().warn("ONNX model is not loaded. Car stopped.", throttle_duration_sec=2.0)
             return
 
-        # 1. Tiền xử lý dữ liệu scan (Crop góc quét & downsample)
         preprocessed_scan = self.preprocess_scan(msg)
-
-        # 2. Suy luận qua mô hình AI
         ai_speed, ai_steer = self.run_model_inference(preprocessed_scan)
 
-        # 3. Điều khiển xe chạy tự động
         self.publish_drive(ai_speed, ai_steer)
         self.get_logger().info(f"[AI DRIVING] Speed: {ai_speed:.2f} m/s | Steer: {math.degrees(ai_steer):.1f}°", throttle_duration_sec=1.0)
 
     def preprocess_scan(self, msg: LaserScan):
-        """Crop góc quét về [-60, 60] độ và downsample về 60 beams"""
+        """Crop scan to [-60, 60] degrees and resample to 60 beams"""
         ranges = np.array(msg.ranges)
         angle_min = msg.angle_min
         angle_max = msg.angle_max
@@ -162,11 +140,10 @@ class AiInferenceSimNode(Node):
         return np.interp(target_angles, valid_angles, valid_ranges)
 
     def run_model_inference(self, preprocessed_scan):
-        """Dự đoán lệnh lái Ackermann qua ONNX Model"""
+        """Inference steering and speed from ONNX model"""
         if not _HAS_ONNX or self.ort_session is None:
             return 0.0, 0.0
 
-        # Nếu model không phải DeployWrapper, ta cần chia 10.0 cho input LiDAR ở đây
         if self.input_name != 'lidar_raw':
             norm_scan = (preprocessed_scan / 10.0).astype(np.float32)
         else:
@@ -174,15 +151,12 @@ class AiInferenceSimNode(Node):
 
         tensor_input = np.expand_dims(norm_scan, axis=0)
 
-        # Chạy suy luận qua ONNX Runtime
         outputs = self.ort_session.run(None, {self.input_name: tensor_input})
-        output = outputs[0][0]  # [speed, steering_angle]
+        output = outputs[0][0]
 
-        # Giải chuẩn hóa (Denormalize) target nếu có file _norm.json đi kèm
         if self.input_name != 'lidar_raw' and self.target_mean is not None and self.target_std is not None:
             output = output * self.target_std + self.target_mean
 
-        # Output: [speed, steering_angle]
         raw_speed = float(output[0])
         if self.fixed_speed > 0.0:
             speed = float(np.clip(self.fixed_speed, 0.0, self.ai_speed))
@@ -192,7 +166,6 @@ class AiInferenceSimNode(Node):
         return speed, steering_angle
 
     def publish_drive(self, speed, steering_angle):
-        """Publish lệnh tới topic /drive (AckermannDriveStamped)"""
         msg = AckermannDriveStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'ego_racecar'

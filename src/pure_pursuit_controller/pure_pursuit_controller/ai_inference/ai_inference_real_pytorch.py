@@ -74,9 +74,9 @@ class AiInferenceRealPytorchNode(Node):
         # --- 1. Parameters ---
         self.declare_parameter('model_path', default_model_path)
         self.declare_parameter('target_beams', 60)
-        self.declare_parameter('ai_speed', 1.0)           # ⚠️ Tốc độ chạy thử xe thật an toàn (1.0 m/s)
+        self.declare_parameter('ai_speed', 1.0)           # Safe speed limit (m/s)
         self.declare_parameter('max_range', 10.0)
-        self.declare_parameter('max_steering_angle', 0.35) # Góc lái vật lý xe thật (rad)
+        self.declare_parameter('max_steering_angle', 0.35) # Max steering angle (rad)
 
         self.model_path = resolve_model_path(self.get_parameter('model_path').value)
         self.target_beams = self.get_parameter('target_beams').value
@@ -89,7 +89,6 @@ class AiInferenceRealPytorchNode(Node):
         self.target_mean = None
         self.target_std = None
 
-        # Tự động tìm file lưu tham số chuẩn hóa (BẮT BUỘC PHẢI CÓ FILE NÀY ĐỂ TRÁNH LỖI BẺ LÁI SAI)
         norm_path = os.path.splitext(self.model_path)[0] + '_norm.json'
         if os.path.exists(norm_path):
             try:
@@ -100,9 +99,9 @@ class AiInferenceRealPytorchNode(Node):
                 self.target_std = np.array(stats['target_std'], dtype=np.float32)
                 self.get_logger().info(f"Loaded normalization stats from {norm_path}: mean={self.target_mean}, std={self.target_std}")
             except Exception as e:
-                self.get_logger().error(f"CRITICAL ERROR loading normalization stats: {e}")
+                self.get_logger().error(f"Error loading normalization stats: {e}")
         else:
-            self.get_logger().error(f"CRITICAL ERROR: Normalization stats file NOT FOUND at {norm_path}! Cannot safely run model without denormalization stats.")
+            self.get_logger().error(f"Normalization stats file not found at {norm_path}.")
 
         if _HAS_TORCH:
             if torch.cuda.is_available():
@@ -113,18 +112,15 @@ class AiInferenceRealPytorchNode(Node):
                 torch.set_num_threads(1)
                 self.get_logger().info("CUDA not available. Using CPU for PyTorch inference.")
             
-            # CHỐT AN TOÀN: Bắt buộc phải có cả model weight (.pth) VÀ normalization stats (_norm.json)
             if self.target_mean is None or self.target_std is None:
-                self.get_logger().error("🛑 SAFETY LOCK ACTIVATED: Model initialization ABORTED because normalization stats (_norm.json) are missing!")
+                self.get_logger().error("Model initialization aborted: normalization stats (_norm.json) missing.")
                 self.model = None
             elif os.path.exists(self.model_path) and self.model_path.endswith('.pth'):
                 try:
-                    # Khởi tạo mô hình trên device
                     raw_model = DAggerMLP(input_dim=self.target_beams, output_dim=2, dropout=0.1).to(self.device)
                     raw_model.load_state_dict(torch.load(self.model_path, map_location=self.device))
                     raw_model.eval()
                     
-                    # 🚀 TỐI ƯU HÓA: Dùng TorchScript JIT Compiler để biên dịch model thành mã C++ tối ưu
                     self.model = torch.jit.script(raw_model)
                     self.get_logger().info(f"Successfully loaded and JIT-compiled PyTorch model from {self.model_path}")
                 except Exception as e:
@@ -132,7 +128,7 @@ class AiInferenceRealPytorchNode(Node):
             else:
                 self.get_logger().error(f"PyTorch Model file not found at {self.model_path}!")
         else:
-            self.get_logger().error("PyTorch is not installed in this environment! Cannot run PyTorch inference.")
+            self.get_logger().error("PyTorch is not installed in this environment.")
 
         # --- 3. Pub/Sub ---
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
@@ -146,24 +142,19 @@ class AiInferenceRealPytorchNode(Node):
         self.get_logger().info("=========================================")
 
     def scan_callback(self, msg: LaserScan):
-        """Xử lý dữ liệu scan, chạy suy luận PyTorch và publish lệnh điều khiển"""
         if self.model is None:
             self.publish_drive(0.0, 0.0)
             self.get_logger().warn("PyTorch model is not loaded. Car stopped.", throttle_duration_sec=2.0)
             return
 
-        # 1. Tiền xử lý dữ liệu scan (Crop góc quét & downsample)
         preprocessed_scan = self.preprocess_scan(msg)
-
-        # 2. Suy luận qua mô hình PyTorch
         ai_speed, ai_steer = self.run_model_inference(preprocessed_scan)
 
-        # 3. Điều khiển xe chạy tự động
         self.publish_drive(ai_speed, ai_steer)
         self.get_logger().info(f"[REAL - PYTORCH] Speed: {ai_speed:.2f} m/s | Steer: {math.degrees(ai_steer):.1f}°", throttle_duration_sec=1.0)
 
     def preprocess_scan(self, msg: LaserScan):
-        """Crop góc quét về [-60, 60] độ và downsample về 60 beams"""
+        """Crop scan to [-60, 60] degrees and resample to 60 beams"""
         ranges = np.array(msg.ranges)
         angle_min = msg.angle_min
         angle_max = msg.angle_max
@@ -186,21 +177,18 @@ class AiInferenceRealPytorchNode(Node):
         return np.interp(target_angles, valid_angles, valid_ranges)
 
     def run_model_inference(self, preprocessed_scan):
-        """Dự đoán lệnh lái Ackermann qua PyTorch Model"""
+        """Inference steering and speed from PyTorch Model"""
         if not _HAS_TORCH or self.model is None:
             return 0.0, 0.0
 
         with torch.no_grad():
-            # Chuẩn hóa giống lúc train: chia 10.0
             norm_scan = preprocessed_scan / 10.0
             tensor_input = torch.tensor(norm_scan, dtype=torch.float32).unsqueeze(0).to(self.device)
             output = self.model(tensor_input).cpu().squeeze(0).numpy()
 
-        # Giải chuẩn hóa (Denormalize) target nếu có file _norm.json đi kèm
         if self.target_mean is not None and self.target_std is not None:
             output = output * self.target_std + self.target_mean
 
-        # Output: [speed, steering_angle]
         speed = float(np.clip(output[0], 0.0, self.ai_speed))
         steering_angle = float(np.clip(output[1], -self.max_steer, self.max_steer))
         return speed, steering_angle

@@ -2,19 +2,7 @@
 """
 dagger_inference_real_pytorch.py
 ────────────────────────────────
-ROS 2 Node chạy Suy luận mô hình AI tự lái tích hợp cơ chế DAgger (Cứu nét & Thu thập dữ liệu liên tục) 
-trên XE THẬT Jetson bằng PYTORCH (.pth).
-
-Logic DAgger Xe Thật:
-  1. Đọc LiDAR `/scan`, tiền xử lý về 60 beams.
-  2. Lấy vị trí xe từ TF (map -> base_link) hoặc /odom để tính Cross-Track Error (CTE) & lệnh Pure Pursuit Chuyên gia.
-  3. Suy luận lệnh AI [ai_speed, ai_steer] qua mô hình PyTorch JIT (.pth).
-  4. Nếu CTE < cte_threshold:
-     - Cho AI tự lái xe chạy.
-  5. Nếu CTE >= cte_threshold HOẶC góc lái AI chênh lệch lớn so với Chuyên gia:
-     - Chuyển sang chế độ CỨU NẾT (OVERRIDE): Đè lệnh Chuyên gia lên `/drive` để bảo vệ xe.
-     - TỰ ĐỘNG THU THẬP DATA: Ghi dữ liệu [60_lidar_beams, expert_speed, expert_steer] vào đệm.
-     - Gom đủ 50 mẫu ➔ Ghi nối tiếp (append) thẳng vào file CSV dataset (dùng để retrain model).
+ROS 2 Node running PyTorch DAgger inference and dataset aggregation on real F1TENTH vehicle.
 """
 
 import os
@@ -40,7 +28,6 @@ except ImportError:
     _HAS_TORCH = False
 
 
-# --- Kiến trúc DAggerMLP — PHẢI khớp 100% với train.py ---
 class DAggerMLP(nn.Module):
     def __init__(self, input_dim=60, output_dim=2, dropout=0.1):
         super(DAggerMLP, self).__init__()
@@ -104,12 +91,12 @@ class DaggerInferenceRealPytorchNode(Node):
         self.declare_parameter('target_beams', 60)
         self.declare_parameter('lookahead_dist', 1.0)
         self.declare_parameter('wheelbase', 0.33)
-        self.declare_parameter('expert_speed', 1.0)        # Vận tốc chuyên gia an toàn xe thật (m/s)
-        self.declare_parameter('ai_speed', 1.0)            # Vận tốc tối đa AI (m/s)
-        self.declare_parameter('cte_threshold', 0.15)      # Ngưỡng lệch đường để cứu nét (m)
+        self.declare_parameter('expert_speed', 1.0)        # Expert speed limit (m/s)
+        self.declare_parameter('ai_speed', 1.0)            # AI speed limit (m/s)
+        self.declare_parameter('cte_threshold', 0.15)      # CTE threshold for expert override (m)
         self.declare_parameter('buffer_size', 50)
         self.declare_parameter('max_range', 10.0)
-        self.declare_parameter('max_steering_angle', 0.35)  # Giới hạn góc lái xe thật (rad)
+        self.declare_parameter('max_steering_angle', 0.35)  # Max steering angle (rad)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
 
@@ -179,7 +166,6 @@ class DaggerInferenceRealPytorchNode(Node):
         self.lock = threading.Lock()
         self.total_saved_samples = 0
 
-        # Mở tạo file CSV nếu chưa có
         os.makedirs(os.path.dirname(self.dataset_path), exist_ok=True)
         if not os.path.exists(self.dataset_path):
             self._write_header()
@@ -216,7 +202,6 @@ class DaggerInferenceRealPytorchNode(Node):
 
     def odom_callback(self, msg: Odometry):
         with self.lock:
-            # 1. Thử đọc TF từ map -> base_link
             try:
                 tf = self.tf_buffer.lookup_transform(
                     self.map_frame, self.base_frame, rclpy.time.Time())
@@ -227,7 +212,6 @@ class DaggerInferenceRealPytorchNode(Node):
                 cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
                 self.car_yaw = math.atan2(siny_cosp, cosy_cosp)
             except Exception:
-                # 2. Fallback dùng odom thô
                 self.car_x = msg.pose.pose.position.x
                 self.car_y = msg.pose.pose.position.y
                 q = msg.pose.pose.orientation
@@ -243,38 +227,29 @@ class DaggerInferenceRealPytorchNode(Node):
                 return
             curr_x, curr_y, curr_yaw = self.car_x, self.car_y, self.car_yaw
 
-        # 1. Tính sai lệch đường (CTE) & Lệnh lái Chuyên gia Pure Pursuit
         cte, nearest_idx = self.calculate_cross_track_error(curr_x, curr_y)
         expert_speed, expert_steer = self.calculate_pure_pursuit(curr_x, curr_y, curr_yaw, nearest_idx)
-
-        # 2. Tiền xử lý LiDAR scan
         preprocessed_scan = self.preprocess_scan(msg)
 
-        # 3. Suy luận AI nếu model có sẵn
         ai_speed, ai_steer = 0.0, 0.0
         if self.model is not None:
             ai_speed, ai_steer = self.run_model_inference(preprocessed_scan)
 
-        # 4. Trạng thái CỨU NẾT (OVERRIDE) hoặc AI TỰ LÁI
         is_override = (self.model is None) or (cte >= self.cte_threshold)
 
         if is_override:
-            # === CHẾ ĐỘ CỨU NẾT (EXPERT DRIVING) ===
             self.publish_drive(expert_speed, expert_steer)
             self.get_logger().warn(
                 f"[REAL DAgger - OVERRIDE] CTE: {cte:.3f}m >= {self.cte_threshold}m | Expert Steer: {math.degrees(expert_steer):.1f}°",
                 throttle_duration_sec=1.0
             )
         else:
-            # === CHẾ ĐỘ AI TỰ LÁI ===
             self.publish_drive(ai_speed, ai_steer)
             self.get_logger().info(
                 f"[REAL DAgger - AI] CTE: {cte:.3f}m | AI Speed: {ai_speed:.2f} m/s, Steer: {math.degrees(ai_steer):.1f}°",
                 throttle_duration_sec=2.0
             )
 
-        # 🚀 THU THẬP DỮ LIỆU LIÊN TỤC 100% TỪ ĐẦU ĐẾN CUỐI (CONTINUOUS LOGGING)
-        # Nhãn lưu luôn luôn là hành vi chuẩn mực của Chuyên gia tại trạng thái LiDAR đó
         with self.lock:
             row = list(preprocessed_scan) + [expert_speed, expert_steer]
             self.buffer.append(row)

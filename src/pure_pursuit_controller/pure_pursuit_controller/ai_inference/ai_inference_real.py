@@ -48,9 +48,9 @@ class AiInferenceRealNode(Node):
         # --- 1. Parameters ---
         self.declare_parameter('model_path', default_model_path)
         self.declare_parameter('target_beams', 60)
-        self.declare_parameter('ai_speed', 1.0)           # ⚠️ Bắt đầu với tốc độ an toàn (1.0m/s) trên xe thật
+        self.declare_parameter('ai_speed', 1.0)           # Speed limit (m/s)
         self.declare_parameter('max_range', 10.0)
-        self.declare_parameter('max_steering_angle', 0.35) # Giới hạn góc lái vật lý của xe (rad)
+        self.declare_parameter('max_steering_angle', 0.35) # Max steering angle (rad)
 
         self.model_path = resolve_model_path(self.get_parameter('model_path').value)
         self.target_beams = self.get_parameter('target_beams').value
@@ -63,7 +63,6 @@ class AiInferenceRealNode(Node):
         if _HAS_ONNX:
             if os.path.exists(self.model_path) and self.model_path.endswith('.onnx'):
                 try:
-                    # Cấu hình để tránh lỗi Thread Affinity / CPU Core mapping trên Jetson (ARM)
                     options = ort.SessionOptions()
                     options.intra_op_num_threads = 1
                     options.inter_op_num_threads = 1
@@ -79,7 +78,7 @@ class AiInferenceRealNode(Node):
             else:
                 self.get_logger().error(f"ONNX Model file not found at {self.model_path}!")
         else:
-            self.get_logger().error("ONNX Runtime is not installed. Install it with: pip install onnxruntime")
+            self.get_logger().error("ONNX Runtime is not installed.")
 
         # --- 3. Pub/Sub ---
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
@@ -93,24 +92,19 @@ class AiInferenceRealNode(Node):
         self.get_logger().info("=========================================")
 
     def scan_callback(self, msg: LaserScan):
-        """Xử lý LiDAR thật, suy luận qua ONNX và điều khiển xe thật"""
         if self.ort_session is None:
             self.publish_drive(0.0, 0.0)
             self.get_logger().warn("ONNX model is not loaded. Car stopped.", throttle_duration_sec=2.0)
             return
 
-        # 1. Tiền xử lý dữ liệu scan từ LiDAR thật (Crop góc quét & downsample)
         preprocessed_scan = self.preprocess_scan(msg)
-
-        # 2. Suy luận qua mô hình AI
         ai_speed, ai_steer = self.run_model_inference(preprocessed_scan)
 
-        # 3. Điều khiển xe thật chạy tự động
         self.publish_drive(ai_speed, ai_steer)
         self.get_logger().info(f"[REAL - AI] Speed: {ai_speed:.2f} m/s | Steer: {math.degrees(ai_steer):.1f}°", throttle_duration_sec=1.0)
 
     def preprocess_scan(self, msg: LaserScan):
-        """Crop góc quét về [-60, 60] độ và downsample về 60 beams"""
+        """Crop scan to [-60, 60] degrees and resample to 60 beams"""
         ranges = np.array(msg.ranges)
         angle_min = msg.angle_min
         angle_max = msg.angle_max
@@ -133,28 +127,27 @@ class AiInferenceRealNode(Node):
         return np.interp(target_angles, valid_angles, valid_ranges)
 
     def run_model_inference(self, preprocessed_scan):
-        """Dự đoán lệnh lái Ackermann qua ONNX Model"""
+        """Inference steering and speed from ONNX model"""
         if not _HAS_ONNX or self.ort_session is None:
             return 0.0, 0.0
 
-        # Chuẩn hóa giống lúc train: chia 10.0
         norm_scan = (preprocessed_scan / 10.0).astype(np.float32)
-        tensor_input = np.expand_dims(norm_scan, axis=0) # Shape (1, 60)
+        tensor_input = np.expand_dims(norm_scan, axis=0)
 
-        # Chạy suy luận qua ONNX Runtime
         outputs = self.ort_session.run(None, {'input': tensor_input})
         output = outputs[0][0]
 
-        # Output: [speed, steering_angle]
         speed = float(np.clip(output[0], 0.0, self.ai_speed))
         steering_angle = float(np.clip(output[1], -self.max_steer, self.max_steer))
         return speed, steering_angle
 
     def publish_drive(self, speed, steering_angle):
-        """Publish lệnh tới mạch điều khiển VESC (/drive)"""
         msg = AckermannDriveStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'laser' # Thường xe thật dùng frame id là laser hoặc base_link
+        msg.header.frame_id = 'laser'
+        msg.drive.speed = float(speed)
+        msg.drive.steering_angle = float(steering_angle)
+        self.drive_pub.publish(msg)
         msg.drive.speed = float(speed)
         msg.drive.steering_angle = float(steering_angle)
         self.drive_pub.publish(msg)

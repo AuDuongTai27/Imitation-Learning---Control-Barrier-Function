@@ -2,18 +2,7 @@
 """
 dagger_inference_sim.py
 ───────────────────────
-ROS 2 Node chạy Suy luận mô hình Imitation Learning tích hợp cơ chế DAgger (Cứu nét) trong môi trường mô phỏng (f1tenth_gym_ros).
-
-Logic:
-  1. Đọc và giải mã dữ liệu LiDAR từ `/scan`, tiền xử lý về 60 beams.
-  2. Lấy tọa độ X,Y của xe từ `/ego_racecar/odom` để tính toán khoảng cách lệch tâm đường (CTE).
-  3. Tính toán trước lệnh lái tối ưu của Chuyên gia (Pure Pursuit - Ackermann) theo quỹ đạo chuẩn (waypoints).
-  4. Nếu CTE < 0.15m:
-     - Dùng AI Model (PyTorch) điều khiển xe chạy tự động (publish tới `/drive`).
-  5. Nếu CTE >= 0.15m:
-     - Kích hoạt chế độ cứu nét: Đè lệnh lái của Pure Pursuit lên `/drive` để cứu xe.
-     - Thu thập đồng thời dữ liệu [LiDAR hiện tại + Lệnh lái của Chuyên gia] lưu lại vào bộ đệm.
-     - Khi bộ đệm gom đủ 50 mẫu, lưu tiếp vào `dagger_dataset_sim.csv`.
+ROS 2 Node running DAgger inference and dataset aggregation in simulation.
 """
 
 import os
@@ -31,7 +20,6 @@ from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
 from nav_msgs.msg import Odometry
 
-# Import ONNX Runtime cho phần suy luận mô hình
 try:
     import onnxruntime as ort
     _HAS_ONNX = True
@@ -82,9 +70,9 @@ class DaggerInferenceSimNode(Node):
         self.declare_parameter('target_beams', 60)
         self.declare_parameter('lookahead_dist', 1.0)
         self.declare_parameter('wheelbase', 0.33)
-        self.declare_parameter('expert_speed', 1.5)       # Vận tốc của chuyên gia (m/s)
-        self.declare_parameter('ai_speed', 1.5)           # Vận tốc tối đa của AI (m/s)
-        self.declare_parameter('cte_threshold', 0.15)     # Ngưỡng cứu nét (m)
+        self.declare_parameter('expert_speed', 1.5)       # Expert speed limit (m/s)
+        self.declare_parameter('ai_speed', 1.5)           # AI speed limit (m/s)
+        self.declare_parameter('cte_threshold', 0.15)     # Override threshold (m)
         self.declare_parameter('buffer_size', 50)
         self.declare_parameter('max_range', 10.0)
 
@@ -111,9 +99,9 @@ class DaggerInferenceSimNode(Node):
                 except Exception as e:
                     self.get_logger().error(f"Failed to load ONNX model: {e}")
             else:
-                self.get_logger().warn(f"ONNX Model file not found at {self.model_path} or invalid format. Will ONLY run on Expert mode.")
+                self.get_logger().warn(f"ONNX Model file not found at {self.model_path}. Running in Expert-only mode.")
         else:
-            self.get_logger().error("ONNX Runtime is not installed in this environment. Running in EXPERT-ONLY mode. Install it with: pip install onnxruntime")
+            self.get_logger().error("ONNX Runtime is not installed.")
 
         # --- 3. Waypoint & Pure Pursuit States ---
         self.waypoints = self.load_waypoints(self.waypoint_path)
@@ -146,7 +134,7 @@ class DaggerInferenceSimNode(Node):
         self.get_logger().info("=========================================")
 
     def load_waypoints(self, file_path):
-        """Tải các điểm waypoint từ file CSV, nếu không có sẽ tự tạo đường tròn ảo để chạy thử"""
+        """Load waypoints from CSV file"""
         if os.path.exists(file_path):
             try:
                 points = []
@@ -157,7 +145,7 @@ class DaggerInferenceSimNode(Node):
                         try:
                             points.append([float(first_row[0]), float(first_row[1])])
                         except ValueError:
-                            pass # Bỏ qua header
+                            pass
                     for row in reader:
                         if len(row) >= 2:
                             points.append([float(row[0]), float(row[1])])
@@ -166,7 +154,7 @@ class DaggerInferenceSimNode(Node):
             except Exception as e:
                 self.get_logger().error(f"Error loading waypoints: {e}")
 
-        # Fallback: Tạo quỹ đạo hình tròn bán kính 4m tâm tại (0, 3) để test
+        # Fallback: circular path radius 4m
         self.get_logger().warn("Waypoint file not found! Generating circular fallback waypoints.")
         theta = np.linspace(0, 2*np.pi, 200)
         r = 4.0
@@ -174,12 +162,10 @@ class DaggerInferenceSimNode(Node):
         return points
 
     def odom_callback(self, msg: Odometry):
-        """Cập nhật vị trí hiện tại của xe và góc quay (yaw)"""
         with self.lock:
             self.car_x = msg.pose.pose.position.x
             self.car_y = msg.pose.pose.position.y
             
-            # Quaternion -> Yaw
             q = msg.pose.pose.orientation
             siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
             cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -187,7 +173,6 @@ class DaggerInferenceSimNode(Node):
             self.odom_received = True
 
     def scan_callback(self, msg: LaserScan):
-        """Xử lý LiDAR, tính sai lệch CTE, quyết định điều khiển qua AI hoặc Expert"""
         with self.lock:
             if not self.odom_received:
                 return
@@ -195,22 +180,14 @@ class DaggerInferenceSimNode(Node):
             curr_y = self.car_y
             curr_yaw = self.car_yaw
 
-        # 1. Tính toán sai lệch khoảng cách (Cross-track Error - CTE) đến quỹ đạo
         cte, nearest_idx = self.calculate_cross_track_error(curr_x, curr_y)
-
-        # 2. Tính toán lệnh lái dự phòng từ Chuyên gia (Pure Pursuit - Ackermann)
         expert_speed, expert_steer = self.calculate_pure_pursuit(curr_x, curr_y, curr_yaw, nearest_idx)
-
-        # 3. Tiền xử lý dữ liệu scan
         preprocessed_scan = self.preprocess_scan(msg)
 
-        # 4. Trạng thái cứu nét hoặc AI
         if self.ort_session is None or cte >= self.cte_threshold:
-            # --- CHẾ ĐỘ CHUYÊN GIA CỨU NÉT (OVERRIDE) ---
             self.publish_drive(expert_speed, expert_steer)
             self.get_logger().warn(f"[SIM - OVERRIDE] CTE: {cte:.3f}m >= {self.cte_threshold}m. Expert driving.", throttle_duration_sec=1.0)
             
-            # Lưu lại dữ liệu lúc cứu nét (DAgger data aggregation)
             with self.lock:
                 row = list(preprocessed_scan) + [expert_speed, expert_steer]
                 self.buffer.append(row)
@@ -220,13 +197,12 @@ class DaggerInferenceSimNode(Node):
                     self.buffer.clear()
                     threading.Thread(target=self._flush_buffer, args=(buffer_to_save,), daemon=True).start()
         else:
-            # --- CHẾ ĐỘ AI SUY LUẬN TỰ ĐỘNG ---
             ai_speed, ai_steer = self.run_model_inference(preprocessed_scan)
             self.publish_drive(ai_speed, ai_steer)
             self.get_logger().info(f"[SIM - AI DRIVING] CTE: {cte:.3f}m < {self.cte_threshold}m.", throttle_duration_sec=2.0)
 
     def calculate_cross_track_error(self, car_x, car_y):
-        """Tính khoảng cách vuông góc ngắn nhất từ xe tới đường đi"""
+        """Calculate cross-track error to raceline"""
         num_pts = len(self.waypoints)
         search_len = min(50, num_pts)
         
@@ -238,7 +214,6 @@ class DaggerInferenceSimNode(Node):
         nearest_idx = indices[min_local_idx]
         self.last_idx = nearest_idx
 
-        # Lấy 2 điểm tạo thành đoạn thẳng quỹ đạo chuẩn
         A = self.waypoints[nearest_idx]
         B = self.waypoints[(nearest_idx + 1) % num_pts]
         P = np.array([car_x, car_y])
@@ -257,33 +232,24 @@ class DaggerInferenceSimNode(Node):
         return cte, nearest_idx
 
     def calculate_pure_pursuit(self, car_x, car_y, car_yaw, nearest_idx):
-        """Thuật toán Pure Pursuit để tính lệnh lái Ackermann"""
+        """Pure pursuit steering angle calculation"""
         num_pts = len(self.waypoints)
         lookahead_idx = nearest_idx
         
-        # Tìm điểm đích cách xe một khoảng lookahead_dist
         while True:
             lookahead_idx = (lookahead_idx + 1) % num_pts
             dist = math.hypot(car_x - self.waypoints[lookahead_idx][0], car_y - self.waypoints[lookahead_idx][1])
-            if dist >= self.lookahead_dist:
-                target_pt = self.waypoints[lookahead_idx]
-                break
-            if lookahead_idx == nearest_idx:
+            if dist >= self.lookahead_dist or lookahead_idx == nearest_idx:
                 target_pt = self.waypoints[lookahead_idx]
                 break
 
-        # Chuyển điểm đích sang hệ tọa độ của xe (Car Frame)
         dx = target_pt[0] - car_x
         dy = target_pt[1] - car_y
         local_y = -dx * math.sin(car_yaw) + dy * math.cos(car_yaw)
 
-        # Tính góc lái Pure Pursuit cho xe Ackermann: delta = atan(2 * L * y / ld^2)
         steering_angle = math.atan((2.0 * self.wheelbase * local_y) / (self.lookahead_dist**2))
-
-        # Giới hạn góc lái tối đa (khoảng 24 độ)
         steering_angle = np.clip(steering_angle, -0.41, 0.41)
 
-        # Giảm tốc khi cua gấp
         speed = self.expert_speed
         if abs(steering_angle) > 0.2:
             speed *= 0.7
@@ -291,7 +257,7 @@ class DaggerInferenceSimNode(Node):
         return speed, steering_angle
 
     def preprocess_scan(self, msg: LaserScan):
-        """Crop góc quét về [-60, 60] độ và downsample về 60 beams"""
+        """Crop scan to [-60, 60] degrees and resample to 60 beams"""
         ranges = np.array(msg.ranges)
         angle_min = msg.angle_min
         angle_max = msg.angle_max
@@ -314,25 +280,21 @@ class DaggerInferenceSimNode(Node):
         return np.interp(target_angles, valid_angles, valid_ranges)
 
     def run_model_inference(self, preprocessed_scan):
-        """Dự đoán lệnh lái Ackermann qua ONNX Model"""
+        """Inference steering and speed from ONNX model"""
         if not _HAS_ONNX or self.ort_session is None:
             return 0.0, 0.0
             
-        # Chuẩn hóa giống lúc train: chia 10.0
         norm_scan = (preprocessed_scan / 10.0).astype(np.float32)
-        tensor_input = np.expand_dims(norm_scan, axis=0) # Shape (1, 60)
+        tensor_input = np.expand_dims(norm_scan, axis=0)
         
-        # Chạy inference qua ONNX Runtime
         outputs = self.ort_session.run(None, {'input': tensor_input})
         output = outputs[0][0]
             
-        # Output: [speed, steering_angle]
         speed = float(np.clip(output[0], 0.0, self.ai_speed))
         steering_angle = float(np.clip(output[1], -0.41, 0.41))
         return speed, steering_angle
 
     def publish_drive(self, speed, steering_angle):
-        """Publish lệnh tới topic /drive (AckermannDriveStamped)"""
         msg = AckermannDriveStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'ego_racecar'
@@ -341,7 +303,6 @@ class DaggerInferenceSimNode(Node):
         self.drive_pub.publish(msg)
 
     def _flush_buffer(self, data_list):
-        """Ghi dữ liệu Expert cứu nét vào dataset CSV"""
         if not os.path.exists(self.dataset_path):
             with open(self.dataset_path, 'w', newline='') as f:
                 writer = csv.writer(f)
