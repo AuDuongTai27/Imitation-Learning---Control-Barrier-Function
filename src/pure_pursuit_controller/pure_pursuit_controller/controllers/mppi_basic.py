@@ -1,23 +1,8 @@
 #!/usr/bin/env python3
 """
-MPPI Obstacle Avoidance Controller — F1TENTH ROS 2
-Dựa trên lý thuyết: Williams et al. 2018, "Information-Theoretic MPC"
-Tham khảo implementation: MizuhoAOKI/python_simple_mppi, UM-ARM-Lab/pytorch_mppi
-
-Các lỗi đã sửa so với bản gốc:
-  BUG-1: Tọa độ vật cản (obstacles) giờ được chuyển sang map frame trong lidar_callback
-         qua TF, đảm bảo compute_cost so sánh pts (map) với obstacles (map) nhất quán.
-  BUG-2: Receding horizon shift — lưu last_steer TRƯỚC khi shift, không bị đọc nhầm vị trí.
-  BUG-3: Visualize quỹ đạo danh nghĩa (rollout từ nominal_control) thay vì mẫu argmax.
-  BUG-4: Dùng effective_noise = perturbed_clipped - nominal cho weight update,
-         đảm bảo rollout và update nhất quán khi có clipping.
-Tối ưu hóa:
-  OPT-1: Track cost chỉ dùng wp_window waypoints gần nhất (giảm từ ~2 GB xuống ~12 MB).
-  OPT-2: np.isfinite lọc NaN/Inf từ LiDAR trước khi xử lý.
-  OPT-3: control smoothness gộp 2 channel vào 1 dòng sum để giảm tạo mảng tạm.
-  OPT-4: Decoupled control_loop (20Hz) song song đa luồng (MultiThreadedExecutor)
-         giảm tải CPU và loại bỏ sensor lag.
-  OPT-5: Tính track cost bằng np.einsum tránh phép tính sqrt thừa trên mảng lớn.
+mppi_basic.py
+─────────────
+MPPI (Model Predictive Path Integral) controller for F1TENTH ROS 2.
 """
 
 import csv
@@ -42,61 +27,45 @@ class MPPIController(Node):
     def __init__(self):
         super().__init__("mppi_controller_node")
 
-        # ── Thông số xe ──────────────────────────────────────────────
-        self.L  = 0.33    # Chiều dài trục cơ sở F1TENTH (m)
-        self.dt = 0.05    # Chu kỳ lấy mẫu (20 Hz)
+        # --- Vehicle Parameters ---
+        self.L  = 0.33    # Wheelbase (m)
+        self.dt = 0.05    # Sample time (20 Hz)
 
-        # ── Thông số MPPI ─────────────────────────────────────────────
-        self.horizon     = 30     # Số bước nhìn trước (1.25 s)
-        self.num_samples = 500    # Số quỹ đạo mẫu ngẫu nhiên
+        # --- MPPI Parameters ---
+        self.horizon     = 30     # Lookahead steps
+        self.num_samples = 500    # Number of rollouts
 
-        # Độ lệch chuẩn nhiễu Gauss: [tốc độ m/s, góc lái rad]
-        # noise steer lớn hơn (0.15 -> 0.25) để né tránh chướng ngại vật khẩn cấp tốt hơn
-        # tăng noise speed để tối ưu hóa việc tăng/giảm tốc ở tốc độ cao
         self.noise_sigma = np.array([1.0, 0.25])
-
-        # Temperature λ: tương thích với cost scale sau chuẩn hóa
         self.lambda_ = 50.0
 
-        # ── Giới hạn cơ giới ─────────────────────────────────────────
-        self.max_speed = 6.0    # Tăng giới hạn tốc độ tối đa lên 6.0 m/s để xe có thể chạy nhanh hơn
+        # --- Kinematic Limits ---
+        self.max_speed = 6.0
         self.min_speed = 1.0
-        self.max_steer = 0.37   # ~20 độ
+        self.max_steer = 0.37
 
-        self.w_track    = 80.0  # Bám đường raceline chặt (tăng từ 40 để xe bám sát vạch đường khi đi cực nhanh)
-        self.w_progress = 1.5   # Tiến dọc đường đua (giảm để không lấn át cost tránh vật cản/bám cua)
-        self.w_control  = 1.5   # Làm mịn lệnh điều khiển
-        self.w_obstacle = 500.0 # Tránh vật cản (trọng số cực lớn theo mppi_nhat)
-        self.w_speed    = 5.0   # Bám vận tốc mục tiêu (giảm từ 15 để ưu tiên cho sự an toàn và bám đường lên trước)
-        self.w_heading  = 15.0  # Bám hướng tiếp tuyến
+        self.w_track    = 80.0
+        self.w_progress = 1.5
+        self.w_control  = 1.5
+        self.w_obstacle = 500.0
+        self.w_speed    = 5.0
+        self.w_heading  = 15.0
 
-        # Bán kính an toàn của xe (m)
-        self.robot_radius   = 0.3  # Tăng lên 0.30m (tạo lớp đệm 5cm an toàn quanh xe)
-        self.danger_radius  = 0.9  # Tăng tương ứng để khớp với robot_radius mới
+        self.robot_radius   = 0.3
+        self.danger_radius  = 0.9
 
-        # Tốc độ mục tiêu lớn nhất trên đường thẳng (m/s)
-        self.target_speed = 5.0  # Tăng tốc độ mục tiêu trên đường thẳng lên 5.0 m/s
+        self.target_speed = 5.0
 
-        # ── Tham số curvature-based speed profiling ─────────────────
-        self.min_speed_curve = 1.8     # Tăng tốc độ tối thiểu khi vào cua gắt lên 1.8 m/s để duy trì động năng
-        self.curve_threshold = 0.35    # Ngưỡng độ cong (rad/m) bắt đầu giảm tốc (tăng từ 0.28 lên 0.35 để cho phép cua nhanh hơn)
-        self.lookahead_wps   = 15      # Tăng số lượng waypoints nhìn trước lên 15 để phanh sớm trước cua từ tốc độ cao
+        self.min_speed_curve = 1.8
+        self.curve_threshold = 0.35
+        self.lookahead_wps   = 15
+        self.wp_window = 50
 
-        # Cửa sổ waypoint cục bộ
-        self.wp_window = 50  # Tăng để có đủ waypoints nhìn trước
-
-        # ── Chuỗi điều khiển danh nghĩa U: (T, 2) → [speed, steer] ──
         self.nominal_control = np.zeros((self.horizon, 2))
         self.nominal_control[:, 0] = self.target_speed
 
-        # Vật cản trong MAP frame (cập nhật từ lidar_callback qua TF)
         self.map_obstacles = np.zeros((0, 2))
         self.obstacle_stamp = None
-
-        # Vật cản ảo được thêm qua click point trên RViz
         self.virtual_obstacles = []
-
-        # ── Hysteresis State cho việc đi lùi ──────────────────────────
         self.is_reversing   = False
         self.forward_min_obs_dist = 999.0  # Khoảng cách tới vật cản phía trước mặt
         self.last_best_obs_cost = 0.0

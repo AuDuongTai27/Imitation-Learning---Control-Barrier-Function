@@ -31,7 +31,8 @@ install(PROGRAMS
 
   # Data Collection
   pure_pursuit_controller/data_collection/data_collection_sim.py
-  pure_pursuit_controller/data_collection/data_collection_odom_sim.py
+  pure_pursuit_controller/data_collection/data_collection_sim_20hz.py
+  pure_pursuit_controller/data_collection/data_collection_sim_90.py
   pure_pursuit_controller/data_collection/data_collection_combined_sim.py
   pure_pursuit_controller/data_collection/data_collection_sim_90.py
   pure_pursuit_controller/data_collection/data_collection_real.py
@@ -48,12 +49,21 @@ install(PROGRAMS
   # Training & Utilities
   pure_pursuit_controller/training/train.py
   pure_pursuit_controller/training/filter_dataset.py
+  pure_pursuit_controller/training/trim_dataset.py
   pure_pursuit_controller/training/check_csv.py
   pure_pursuit_controller/training/eval_ai_performance.py
   pure_pursuit_controller/training/steering_logger.py
   pure_pursuit_controller/training/visualize_steering.py
   pure_pursuit_controller/training/downOnnx.py
-  pure_pursuit_controller/sync_sim_pose.py
+  
+  # scripts
+  pure_pursuit_controller/scripts/sync_sim_pose.py
+  pure_pursuit_controller/scripts/resolveWaypointPath.py
+
+  # Benchmarking & Tools
+  pure_pursuit_controller/tools/benchmark_frequency.py
+  pure_pursuit_controller/tools/visualize_benchmark.py
+  pure_pursuit_controller/tools/DO_HZ.py
 
   # RRT Planner
   rrt_planner/rrt.py

@@ -2,23 +2,7 @@
 """
 ai_safe_controller_jetson.py
 ────────────────────────────
-[NODE CHẠY TRÊN BO MẠCH JETSON XE THẬT]
-Node AI Inference & Bộ Điều Khiển An Toàn Phân Tán (Siêu nhẹ cho Jetson CPU/GPU).
-
-Vai trò:
-  1. Suy luận AI bẻ lái từ 60 tia LiDAR qua PyTorch JIT (.pth).
-  2. Đọc đề xuất bẻ lái Chuyên gia RRT* từ Laptop gửi sang qua topic trung gian `/rrt_expert_drive`.
-  3. So sánh chênh lệch góc lái `steer_diff = abs(ai_steer - rrt_steer)`:
-     - Nếu AI lái mượt (`steer_diff <= override_threshold`) ➔ Phát lệnh AI lên `/drive`, gửi status `1` lên `/dagger_status`.
-     - Nếu RRT* cứu nét (`steer_diff > override_threshold`)  ➔ Phát lệnh RRT* lên `/drive`, gửi status `0` lên `/dagger_status` (Kích hoạt Laptop ghi DAgger CSV).
-
-Subscribe:
-  /scan             (sensor_msgs/LaserScan)                 — Cảm biến LiDAR thật trên Jetson
-  /rrt_expert_drive (ackermann_msgs/AckermannDriveStamped)  — Lệnh RRT* từ Laptop truyền qua wifi
-
-Publish:
-  /drive            (ackermann_msgs/AckermannDriveStamped)  — Phát đến mạch VESC cho xe chạy
-  /dagger_status    (std_msgs/Int32)                         — Báo tín hiệu về cho Laptop (0: RRT, 1: AI)
+ROS 2 Node running AI inference and safety override control on Jetson onboard computer.
 """
 
 import os
@@ -42,10 +26,6 @@ except ImportError:
     _HAS_TORCH = False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  1. KIẾN TRÚC MODEL AI PYTORCH — PHẢI KHỚP 100% VỚI TRAIN.PY
-# ─────────────────────────────────────────────────────────────────────────────
-
 class DAggerMLP(nn.Module):
     def __init__(self, input_dim=60, output_dim=2, dropout=0.1):
         super().__init__()
@@ -65,32 +45,27 @@ class DAggerMLP(nn.Module):
         return self.network(x)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  2. NODE CHÍNH (JETSON CONTROLLER)
-# ─────────────────────────────────────────────────────────────────────────────
-
 class AiSafeControllerJetsonNode(Node):
     def __init__(self):
         super().__init__('ai_safe_controller_jetson_node')
 
         current_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # ── PARAMETERS ───────────────────────────────────────────
+        # --- Parameters ---
         self.declare_parameter('model_path', os.path.join(current_dir, 'combine_1.pth'))
         self.declare_parameter('target_beams', 60)
         self.declare_parameter('ai_speed', 1.0)
         self.declare_parameter('max_range', 10.0)
         self.declare_parameter('max_steering_ai', 0.35)
 
-        self.declare_parameter('override_threshold', 0.15)  # Ngưỡng bẻ lái cứu nét (rad)
-        self.declare_parameter('override_hold_secs', 1.0)  # Thời gian RRT* giữ lái sau khi cứu (giây)
+        self.declare_parameter('override_threshold', 0.15)  # Override threshold (rad)
+        self.declare_parameter('override_hold_secs', 1.0)   # Override hold duration (s)
 
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('expert_drive_topic', '/rrt_expert_drive')
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('status_topic', '/dagger_status')
 
-        # Đọc parameters
         self.model_path         = self.get_parameter('model_path').value
         self.target_beams       = self.get_parameter('target_beams').value
         self.ai_speed           = self.get_parameter('ai_speed').value
@@ -105,7 +80,7 @@ class AiSafeControllerJetsonNode(Node):
         self.drive_topic        = self.get_parameter('drive_topic').value
         self.status_topic       = self.get_parameter('status_topic').value
 
-        # ── STATE ────────────────────────────────────────────────
+        # --- State ---
         self.lock = threading.Lock()
 
         self.latest_expert_drive = None
@@ -114,7 +89,7 @@ class AiSafeControllerJetsonNode(Node):
         self.override_active     = False
         self.override_until      = 0.0
 
-        # ── LOAD PYTORCH MODEL ───────────────────────────────────
+        # --- Load PyTorch Model ---
         self.model        = None
         self.target_mean  = None
         self.target_std   = None
@@ -145,7 +120,7 @@ class AiSafeControllerJetsonNode(Node):
             else:
                 self.get_logger().error(f"Model file not found: {self.model_path}")
 
-        # ── PUB/SUB ──────────────────────────────────────────────
+        # --- Pub/Sub ---
         self.drive_pub  = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.status_pub = self.create_publisher(Int32, self.status_topic, 10)
 
@@ -162,10 +137,8 @@ class AiSafeControllerJetsonNode(Node):
     def scan_callback(self, msg: LaserScan):
         now = time.monotonic()
 
-        # 1. AI Inference
         ai_steer, ai_spd = self._run_ai(msg)
 
-        # 2. Lấy lệnh RRT* từ Laptop
         with self.lock:
             expert_msg  = self.latest_expert_drive
             expert_age  = now - self.latest_expert_time
@@ -179,7 +152,6 @@ class AiSafeControllerJetsonNode(Node):
             expert_steer = 0.0
             expert_speed = 0.0
 
-        # 3. So sánh chênh lệch góc lái & Quyết định Override
         if expert_valid:
             steer_diff = abs(ai_steer - expert_steer)
             if steer_diff > self.override_threshold:
@@ -192,27 +164,23 @@ class AiSafeControllerJetsonNode(Node):
                 self.override_active = False
             is_override = self.override_active
 
-        # 4. Lựa chọn Lệnh Lái & Phát Status về cho Laptop
         if is_override and expert_valid:
             active_mode = 'RRT_EXPERT'
             chosen_steer = expert_steer
             chosen_speed = expert_speed
-            dagger_status_code = 0  # 0: RRT* đang cứu nét -> Laptop lưu DAgger CSV
+            dagger_status_code = 0
         else:
             active_mode = 'AI'
             chosen_steer = ai_steer
             chosen_speed = ai_spd
-            dagger_status_code = 1  # 1: AI đang tự lái -> Laptop dừng ghi
+            dagger_status_code = 1
 
-        # Publish lệnh lên VESC /drive
         self._publish_drive(chosen_steer, chosen_speed)
 
-        # Publish status về Laptop
         status_msg = Int32()
         status_msg.data = dagger_status_code
         self.status_pub.publish(status_msg)
 
-        # In log đối chiếu
         steer_diff = abs(ai_steer - expert_steer) if expert_valid else 0.0
         self.get_logger().info(
             f"[{active_mode:10s}] "
@@ -266,7 +234,7 @@ class AiSafeControllerJetsonNode(Node):
 
     def _log_startup(self):
         self.get_logger().info("=" * 60)
-        self.get_logger().info(" 🚀 AI SAFE CONTROLLER (JETSON BOARD) STARTED")
+        self.get_logger().info(" AI SAFE CONTROLLER (JETSON BOARD) STARTED")
         self.get_logger().info(f"  Model Path  : {self.model_path}")
         self.get_logger().info(f"  AI Speed    : {self.ai_speed} m/s")
         self.get_logger().info(f"  RRT* Relay  : {self.expert_drive_topic}")
