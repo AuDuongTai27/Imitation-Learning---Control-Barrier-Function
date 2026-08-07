@@ -34,7 +34,7 @@ class HybridPlannerSim(Node):
         self.declare_parameter("drive_topic", "/drive")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "ego_racecar/base_link") # Frame xe trong mô phỏng
-        self.declare_parameter("wheelbase", 0.33) # Chiều dài cơ sở mô phỏng
+        self.declare_parameter("wheelbase", 0.39) # Chiều dài cơ sở mô phỏng
 
         self.csv_path = self.get_parameter("waypoint_path").value
         self.rrt_goal_dist = self.get_parameter("lookahead_global").value

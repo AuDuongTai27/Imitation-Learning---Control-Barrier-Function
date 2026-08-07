@@ -50,7 +50,7 @@ class AiInferenceSimNode(Node):
         super().__init__('ai_inference_sim_node')
 
         # --- 1. Parameters ---
-        default_model = '/sim_ws/src/pure_pursuit_controller/pure_pursuit_controller/models/combined_rrt_dagger.onnx'
+        default_model = '/sim_ws/src/pure_pursuit_controller/pure_pursuit_controller/models/final_combined_37500.onnx'
         if not os.path.exists(default_model):
             default_model = resolve_model_path(default_model)
 
@@ -196,7 +196,7 @@ class AiInferenceSimNode(Node):
         msg = AckermannDriveStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'ego_racecar'
-        msg.drive.speed = float(speed)
+        msg.drive.speed = float(3.0)
         msg.drive.steering_angle = float(steering_angle)
         self.drive_pub.publish(msg)
 

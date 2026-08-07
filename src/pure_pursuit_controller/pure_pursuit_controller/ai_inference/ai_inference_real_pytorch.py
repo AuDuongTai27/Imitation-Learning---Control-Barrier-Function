@@ -89,7 +89,7 @@ class AiInferenceRealPytorchNode(Node):
         self.target_mean = None
         self.target_std = None
 
-        # Tự động tìm file lưu tham số chuẩn hóa nếu có
+        # Tự động tìm file lưu tham số chuẩn hóa (BẮT BUỘC PHẢI CÓ FILE NÀY ĐỂ TRÁNH LỖI BẺ LÁI SAI)
         norm_path = os.path.splitext(self.model_path)[0] + '_norm.json'
         if os.path.exists(norm_path):
             try:
@@ -100,7 +100,9 @@ class AiInferenceRealPytorchNode(Node):
                 self.target_std = np.array(stats['target_std'], dtype=np.float32)
                 self.get_logger().info(f"Loaded normalization stats from {norm_path}: mean={self.target_mean}, std={self.target_std}")
             except Exception as e:
-                self.get_logger().warn(f"Failed to load normalization stats: {e}")
+                self.get_logger().error(f"CRITICAL ERROR loading normalization stats: {e}")
+        else:
+            self.get_logger().error(f"CRITICAL ERROR: Normalization stats file NOT FOUND at {norm_path}! Cannot safely run model without denormalization stats.")
 
         if _HAS_TORCH:
             if torch.cuda.is_available():
@@ -111,7 +113,11 @@ class AiInferenceRealPytorchNode(Node):
                 torch.set_num_threads(1)
                 self.get_logger().info("CUDA not available. Using CPU for PyTorch inference.")
             
-            if os.path.exists(self.model_path) and self.model_path.endswith('.pth'):
+            # CHỐT AN TOÀN: Bắt buộc phải có cả model weight (.pth) VÀ normalization stats (_norm.json)
+            if self.target_mean is None or self.target_std is None:
+                self.get_logger().error("🛑 SAFETY LOCK ACTIVATED: Model initialization ABORTED because normalization stats (_norm.json) are missing!")
+                self.model = None
+            elif os.path.exists(self.model_path) and self.model_path.endswith('.pth'):
                 try:
                     # Khởi tạo mô hình trên device
                     raw_model = DAggerMLP(input_dim=self.target_beams, output_dim=2, dropout=0.1).to(self.device)

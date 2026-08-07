@@ -40,6 +40,15 @@ class RRTStarAlgorithm():
         if len(free_x) == 0: return None
         random_index = np.random.choice(len(free_x))
         return np.array([free_x[random_index], free_y[random_index]])
+    # def sample(self):
+    #     # 10% xác suất thiên hướng lấy trực tiếp điểm Goal
+    #     if np.random.rand() < 0.1:
+    #         return np.array([self.goal_node.x, self.goal_node.y])
+            
+    #     free_x, free_y = np.where(self.grid == 0)
+    #     if len(free_x) == 0: return None
+    #     random_index = np.random.choice(len(free_x))
+    #     return np.array([free_x[random_index], free_y[random_index]])
 
     def nearest(self, tree, sampled_point):
         nearest_node_idx = 0
