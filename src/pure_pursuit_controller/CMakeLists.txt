@@ -28,6 +28,7 @@ install(PROGRAMS
   pure_pursuit_controller/ai_inference/ai_inference_real_pytorch.py
   pure_pursuit_controller/ai_inference/dagger_inference_sim.py
   pure_pursuit_controller/ai_inference/dagger_inference_real_pytorch.py
+  pure_pursuit_controller/ai_inference/rrl_inference_real_pytorch.py
 
   # Data Collection
   pure_pursuit_controller/data_collection/data_collection_sim.py
@@ -45,6 +46,7 @@ install(PROGRAMS
   # Obstacle Spawners
   pure_pursuit_controller/obstacles/auto_obstacle_spawner.py
   pure_pursuit_controller/obstacles/obstacle_spawner.py
+  pure_pursuit_controller/obstacles/persistent_obstacle_spawner.py
 
   # Training & Utilities
   pure_pursuit_controller/training/train.py
@@ -56,9 +58,17 @@ install(PROGRAMS
   pure_pursuit_controller/training/visualize_steering.py
   pure_pursuit_controller/training/downOnnx.py
   
+  # RRL Reinforcement Learning
+  pure_pursuit_controller/controllers/rrl_safe_controller_node.py
+  pure_pursuit_controller/training/rrl/residual_env_wrapper.py
+  pure_pursuit_controller/training/rrl/rrl_model.py
+  pure_pursuit_controller/training/rrl/train_ppo_rrl.py
+
   # scripts
   pure_pursuit_controller/scripts/sync_sim_pose.py
+  pure_pursuit_controller/scripts/sync_waypoint.py
   pure_pursuit_controller/scripts/resolveWaypointPath.py
+  pure_pursuit_controller/scripts/waypoint_visualizer.py
 
   # Benchmarking & Tools
   pure_pursuit_controller/tools/benchmark_frequency.py

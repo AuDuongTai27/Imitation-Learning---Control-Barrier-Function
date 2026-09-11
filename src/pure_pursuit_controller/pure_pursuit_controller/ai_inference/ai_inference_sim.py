@@ -47,7 +47,7 @@ class AiInferenceSimNode(Node):
 
         self.declare_parameter('model_path', default_model)
         self.declare_parameter('target_beams', 60)
-        self.declare_parameter('ai_speed', 10.0)           # Max AI speed (m/s)
+        self.declare_parameter('ai_speed', 5.0)           # Max AI speed (m/s)
         self.declare_parameter('max_range', 10.0)
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('scan_topic', '/scan')
@@ -169,7 +169,7 @@ class AiInferenceSimNode(Node):
         msg = AckermannDriveStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'ego_racecar'
-        msg.drive.speed = float(3.0)
+        msg.drive.speed = speed
         msg.drive.steering_angle = float(steering_angle)
         self.drive_pub.publish(msg)
 
