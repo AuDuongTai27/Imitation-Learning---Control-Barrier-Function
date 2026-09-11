@@ -29,7 +29,7 @@ class CbfSafetyFilterNode(Node):
         # --- 1. Parameters ---
         self.declare_parameter('d_min', 0.1)           # Minimum safety distance (m)
         self.declare_parameter('gamma', 2.0)            # CBF gain parameter
-        self.declare_parameter('v_max', 3.0)            # Max speed (m/s)
+        self.declare_parameter('v_max', 1.5)            # Max speed (m/s)
         self.declare_parameter('steer_max', 0.41)       # Max steering angle (rad)
         self.declare_parameter('slack_weight', 1e4)     # Slack weight
         self.declare_parameter('num_danger_rays', 15)   # Number of danger LiDAR rays

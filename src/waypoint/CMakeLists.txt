@@ -18,6 +18,7 @@ find_package(ament_cmake REQUIRED)
 # find_package(<dependency> REQUIRED)
 install(PROGRAMS
   f1tenth_waypoint_generator/waypoint_generator_node.py
+  f1tenth_waypoint_generator/visualize_existing_waypoints.py
 
   DESTINATION lib/${PROJECT_NAME})  
 install(DIRECTORY

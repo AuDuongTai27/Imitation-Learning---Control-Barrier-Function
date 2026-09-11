@@ -33,7 +33,7 @@ class CBFQPSafetyFilter:
         self.gamma = gamma
         self.v_max = v_max
         self.steer_max = steer_max
-        self.slack_weight = slack_weight
+        self.slack_weight = slack_weight        
         self.num_danger_rays = num_danger_rays
         self.fov_cutoff_rad = math.radians(fov_cutoff_deg)
 
