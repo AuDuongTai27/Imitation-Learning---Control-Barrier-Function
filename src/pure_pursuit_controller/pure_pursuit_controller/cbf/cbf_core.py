@@ -27,7 +27,7 @@ class CBFQPSafetyFilter:
         steer_max: float = 0.41,      # Steering angle limit (rad)
         slack_weight: float = 1e4,    # Slack variable penalty weight
         num_danger_rays: int = 15,    # Number of nearest LiDAR beams for QP constraints
-        fov_cutoff_deg: float = 10.0  # Frontal FOV cutoff (+/- deg)
+        fov_cutoff_deg: float = 15.0  # Frontal FOV cutoff (+/- deg)
     ):
         self.d_min = d_min
         self.gamma = gamma

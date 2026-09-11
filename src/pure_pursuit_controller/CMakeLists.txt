@@ -28,6 +28,7 @@ install(PROGRAMS
   pure_pursuit_controller/ai_inference/ai_inference_real_pytorch.py
   pure_pursuit_controller/ai_inference/dagger_inference_sim.py
   pure_pursuit_controller/ai_inference/dagger_inference_real_pytorch.py
+  pure_pursuit_controller/ai_inference/rrl_inference_real_pytorch.py
 
   # Data Collection
   pure_pursuit_controller/data_collection/data_collection_sim.py
