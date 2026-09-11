@@ -169,8 +169,8 @@ class F1TenthResidualEnvWrapper(gym.Wrapper):
         return rrl_obs, a_dil
 
     def step(self, action_rrl_norm: np.ndarray):
-        # Scale RRL policy output [-1, 1] to actual offsets [±1.0 m/s, ±0.05 rad]
-        a_R = action_rrl_norm * self.scale
+        # action_rrl_norm from RRLActorCritic is already mapped to physical bounds [Δv, Δδ]
+        a_R = action_rrl_norm
 
         # Get current state and nominal DIL action from last observation
         gym_raw_obs = self.last_gym_obs
@@ -200,27 +200,46 @@ class F1TenthResidualEnvWrapper(gym.Wrapper):
             obs, reward_raw, done, info = step_res
             truncated = False
 
-        # Extract vehicle velocity components for reward calculation
+        # v_total = commanded speed used in reward (immediate, no inertia lag)
+        # This avoids the gym inertia trap where v_x from obs is always ~0 after reset
+        v_total_commanded = float(u_executed[0])  # Speed actually sent to env (after CBF)
+
+        # v_x from obs is still used for slip/collision detection
         if isinstance(obs, dict):
             v_x = float(obs.get('linear_vels_x', [0.0])[0])
             v_y = float(obs.get('linear_vels_y', [0.0])[0])
             collision = bool(info.get('collisions', [0])[0])
         else:
-            v_x, v_y, collision = 0.0, 0.0, bool(done)
+            v_x, v_y, collision = float(u_executed[0]), 0.0, bool(done)
 
-        # Step Reward Calculation:
-        # 1. Forward Speed progress: tau1 * v_x
-        # 2. Penalty for lateral velocity (drifting/skidding): tau2 * v_y^2
-        # 3. Action Smoothness Penalty: penalize change in residual actions to avoid high-frequency chatter
+        # Extract frontal clearance distance from LiDAR AFTER action execution (new obs, not old)
+        raw_scan_obs = obs['scans'][0] if isinstance(obs, dict) and 'scans' in obs else np.ones(1080) * 8.0
+        scan_meters, _ = self._preprocess_scan(raw_scan_obs)
+        front_dist = float(np.min(scan_meters[24:36]))  # Frontal FOV (-15 to +15 deg)
+
+        # Dynamic Speed & Corner Slowdown Reward:
+        # Use v_total_commanded (not gym v_x) to avoid inertia lag in reward signal.
+        # Straightaway: reward commanded speed, penalize steering bias.
+        # Corner/Obstacle: target safe cornering speed, penalize overshoot.
+        if front_dist > 3.5:
+            speed_reward = 2.0 * max(0.0, v_total_commanded)
+            # L2 steer bias penalty: symmetric gradient, pulls Δδ toward 0
+            steer_bias_penalty = 2.0 * (float(a_R[1]) ** 2)
+        else:
+            v_target_corner = max(1.5, min(3.5, front_dist * 1.0))
+            speed_reward = -2.0 * abs(v_total_commanded - v_target_corner)
+            steer_bias_penalty = 0.0
+
+        # Action Smoothness Penalty: only penalize jerk (rate of change), NOT magnitude
         delta_action = a_R - self.prev_a_R
-        action_smoothness_penalty = 0.5 * np.sum(delta_action ** 2) + 0.1 * np.sum(a_R ** 2)
-        
-        # 4. Crawling / Stopping Penalty: penalize v_x < 1.0 m/s to prevent conservative stopping trap
-        stopping_penalty = 0.0
-        if v_x < 1.0:
-            stopping_penalty = (1.0 - v_x) * 2.0
+        action_smoothness_penalty = 0.2 * np.sum(delta_action ** 2)
 
-        rrl_reward = (self.tau1 * v_x) + (self.tau2 * (v_y ** 2)) - action_smoothness_penalty - stopping_penalty
+        # Crawling / Stopping Penalty: only trigger below 0.8 m/s (not 1.5) to allow braking
+        stopping_penalty = (0.8 - v_total_commanded) * 3.0 if v_total_commanded < 0.8 else 0.0
+        # Side Slip Penalty (still uses obs v_y for physical accuracy):
+        slip_penalty = 0.005 * (v_y ** 2)
+
+        rrl_reward = speed_reward - steer_bias_penalty - action_smoothness_penalty - stopping_penalty - slip_penalty
         if collision:
             rrl_reward += self.rho
 

@@ -148,8 +148,8 @@ def train_custom_ppo(env, args):
                 # Value Function Loss
                 critic_loss = 0.5 * nn.MSELoss()(new_values, mb_returns)
 
-                # Total PPO Loss
-                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy.mean()
+                # Total PPO Loss (Fix 4: entropy_coeff 0.01→0.05 to prevent early policy collapse)
+                loss = actor_loss + 0.5 * critic_loss - 0.05 * entropy.mean()
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -246,7 +246,11 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.998)
     parser.add_argument("--clip_eps", type=float, default=0.2)
     parser.add_argument("--target_kl", type=float, default=0.01)
-    parser.add_argument("--use_cbf", action="store_true", default=True, help="Enable CBF Safety Filter in loop")
+    # NOTE: CBF is disabled during training by default. CBF in training corrupts the reward signal
+    # by clamping v_total_commanded to 0 near walls, causing constant stopping_penalty.
+    # The gym's own done=True collision detection provides safety during training.
+    # Enable CBF only for real-robot deployment.
+    parser.add_argument("--use_cbf", action="store_true", default=False, help="Enable CBF Safety Filter in training loop (NOT recommended; corrupts reward signal)")
     parser.add_argument("--tensorboard_dir", type=str, default="./tensorboard_rrl_logs/")
 
     args = parser.parse_args()

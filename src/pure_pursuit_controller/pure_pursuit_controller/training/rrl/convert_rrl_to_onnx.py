@@ -21,14 +21,10 @@ class RRLActorOnly(nn.Module):
     """Wrapper that outputs only the deterministic action offset for ONNX export"""
     def __init__(self, base_model: RRLActorCritic):
         super(RRLActorOnly, self).__init__()
-        self.actor_backbone = base_model.actor_backbone
-        self.actor_mean = base_model.actor_mean
-        self.register_buffer("scale", base_model.scale)
+        self.base_model = base_model
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        features = self.actor_backbone(state)
-        mean_normalized = torch.tanh(self.actor_mean(features))
-        action_residual = mean_normalized * self.scale
+        action_residual, _, _ = self.base_model(state)
         return action_residual
 
 
@@ -39,7 +35,7 @@ def convert_pth_to_onnx(pth_path: str, onnx_path: str, state_dim: int = 66):
     device = torch.device("cpu")
     
     # 1. Load trained PyTorch RRL Actor-Critic model
-    rrl_full = RRLActorCritic(state_dim=state_dim, action_dim=2, scale=(1.0, 0.05))
+    rrl_full = RRLActorCritic(state_dim=state_dim, action_dim=2)
     
     # Support SB3 state_dict or raw PyTorch state_dict
     state_dict = torch.load(pth_path, map_location=device)

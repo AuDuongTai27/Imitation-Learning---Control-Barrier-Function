@@ -283,10 +283,10 @@ class RRLSafeControllerNode(Node):
         # 4. RRL Policy Inference
         if self.enable_rrl:
             raw_a_R = self._infer_rrl(rrl_state)
-            # Prevent stopping trap: clamp negative speed offset to at most -0.3 m/s
-            raw_a_R[0] = float(np.clip(raw_a_R[0], -0.3, 0.4))
-            # EMA Low-pass Action Filtering (alpha=0.3) for smooth driving
-            a_R_np = 0.3 * raw_a_R + 0.7 * self.prev_a_R
+            # Dynamic speed adaptation bounds: allow deceleration down to -1.5 m/s in corners, and acceleration up to +2.5 m/s
+            raw_a_R[0] = float(np.clip(raw_a_R[0], -1.5, 2.5))
+            # EMA Low-pass Action Filtering (alpha=0.35) for smooth driving
+            a_R_np = 0.35 * raw_a_R + 0.65 * self.prev_a_R
         else:
             a_R_np = np.zeros(2, dtype=np.float32)
 

@@ -48,11 +48,28 @@ class RRLActorCritic(nn.Module):
         nn.init.zeros_(self.actor_mean.weight)
         nn.init.zeros_(self.actor_mean.bias)
 
+    def _map_action(self, mean_raw: torch.Tensor) -> torch.Tensor:
+        """Dynamic Asymmetric action mapping for High-Speed & Adaptive Slowdown:
+        - Speed offset: [-1.5 m/s, +2.5 m/s]
+        - Steering offset: [-0.035 rad, +0.035 rad] (~2.0 deg)
+        Preserves zero-init property: mean_raw = 0 -> action_residual = [0, 0]
+        Uses torch.where to avoid zero-gradient bottleneck at zero initialization.
+        """
+        u_v = mean_raw[..., 0:1]
+        u_s = mean_raw[..., 1:2]
+
+        v_boost = 2.5
+        v_brake = 1.5
+        steer_max = 0.035
+
+        delta_v = torch.where(u_v >= 0, torch.tanh(u_v) * v_boost, torch.tanh(u_v) * v_brake)
+        delta_s = torch.tanh(u_s) * steer_max
+        return torch.cat([delta_v, delta_s], dim=-1)
+
     def forward(self, state: torch.Tensor):
         features = self.actor_backbone(state)
-        # Tanh outputs in range [-1, 1], then multiplied by scale vector
-        mean_normalized = torch.tanh(self.actor_mean(features))
-        action_residual = mean_normalized * self.scale
+        mean_raw = self.actor_mean(features)
+        action_residual = self._map_action(mean_raw)
         
         std = torch.exp(self.actor_log_std).expand_as(action_residual)
         value = self.critic(state)
@@ -66,16 +83,20 @@ class RRLActorCritic(nn.Module):
         
         dist = torch.distributions.Normal(action_residual_mean, std)
         raw_action = dist.sample()
-        # Clamp to bounds specified by scale
-        clamped_action = torch.clamp(raw_action, -self.scale, self.scale)
+        # Fix 5: Align clip bounds with _map_action: v in [-1.5, +2.5], steer in [-0.035, +0.035]
+        # Previously -0.3 lower bound caused log_prob bias in PPO update (mismatch with _map_action braking range)
+        v_clamped = torch.clamp(raw_action[..., 0:1], -1.5, 2.5)
+        steer_clamped = torch.clamp(raw_action[..., 1:2], -0.035, 0.035)
+        clamped_action = torch.cat([v_clamped, steer_clamped], dim=-1)
+
         log_prob = dist.log_prob(clamped_action).sum(dim=-1, keepdim=True)
         return clamped_action, log_prob, value
 
     def evaluate_actions(self, state: torch.Tensor, action: torch.Tensor):
         """Evaluate log_prob and entropy for PPO policy update batch"""
         features = self.actor_backbone(state)
-        mean_normalized = torch.tanh(self.actor_mean(features))
-        action_residual_mean = mean_normalized * self.scale
+        mean_raw = self.actor_mean(features)
+        action_residual_mean = self._map_action(mean_raw)
         std = torch.exp(self.actor_log_std).expand_as(action_residual_mean)
         
         dist = torch.distributions.Normal(action_residual_mean, std)
