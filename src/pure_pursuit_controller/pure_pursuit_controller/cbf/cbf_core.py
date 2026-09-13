@@ -2,14 +2,14 @@
 """
 cbf_core.py
 ───────────
-Lớp toán học CBFQPSafetyFilter chịu trách nhiệm lọc an toàn cho xe tự lái F1TENTH.
+Lớp toán học CBFQPSafetyFilter chịu trách nhiệm lọc an toàn cho xe tự lái F1TENTH,
+đã được NÂNG CẤP mô hình Động học Xe Ackermann (Ackermann Kinematics) & Quán tính phanh vật lý.
 
 Chức năng:
-  - Nhận u_nominal = [v_nom, delta_nom] từ mô hình AI (Imitation Learning/RL).
-  - Đọc dữ liệu khoảng cách và góc của các tia LiDAR.
-  - Thiết lập bất đẳng thức Control Barrier Function (CBF) với khoảng cách an toàn d_min.
-  - Giải bài toán Quadratic Program (QP) thời gian thực bằng Scipy SLSQP / OSQP.
-  - Tích hợp biến nới lỏng (Slack Variable) để tránh Infeasible QP khi tiệm cận tường.
+  - Tích hợp Mô hình Động học Ackermann: Kết nối trực tiếp Góc lái delta với Tốc độ góc quay xe psi_dot = (v / L) * tan(delta).
+  - Tích hợp Quãng đường Phanh Vật lý (Dynamic Braking Cushion): Tự động tính quãng đường trôi quán tính (v^2 / 2a_brake).
+  - Tự động bẻ lái lượn vòng né tường (Steering Evasion) kết hợp phanh chủ động khi ở vận tốc cao.
+  - Giải bài toán Quadratic Program (QP) thời gian thực bằng Scipy SLSQP / OSQP (< 1ms).
 """
 
 import math
@@ -34,7 +34,10 @@ class CBFQPSafetyFilter:
         steer_max: float = 0.41,      # Giới hạn góc lái tối đa (rad ~ 23.5 deg)
         slack_weight: float = 1e4,    # Trọng số phạt biến nới lỏng Slack Variable
         num_danger_rays: int = 15,    # Số tia LiDAR nguy hiểm nhất cần đưa vào bài toán QP
-        fov_cutoff_deg: float = 10.0  # Góc quét phía trước xét vật cản (+/- độ)
+        fov_cutoff_deg: float = 75.0, # Góc quét phía trước xét vật cản (+/- độ)
+        wheelbase: float = 0.39,      # Chiều dài cơ sở đo thực tế từ xe thật L (m)
+        a_max_brake: float = 2.61,     # Gia tốc phanh tối đa thực tế đo từ xe thật (m/s^2)
+        lat_accel_max: float = 4.5    # Gia tốc bám đường hướng tâm tối đa (m/s^2)
     ):
         self.d_min = d_min
         self.gamma = gamma
@@ -43,6 +46,11 @@ class CBFQPSafetyFilter:
         self.slack_weight = slack_weight
         self.num_danger_rays = num_danger_rays
         self.fov_cutoff_rad = math.radians(fov_cutoff_deg)
+
+        # --- Tham số Động học Xe Ackermann ---
+        self.wheelbase = wheelbase
+        self.a_max_brake = a_max_brake
+        self.lat_accel_max = lat_accel_max
 
     def filter(self, u_nominal: np.ndarray, ranges: np.ndarray, angles: np.ndarray) -> np.ndarray:
         """
@@ -57,8 +65,8 @@ class CBFQPSafetyFilter:
         v_nom = float(u_nominal[0])
         delta_nom = float(u_nominal[1])
 
-        # 1. Trích xuất các ràng buộc CBF từ LiDAR
-        G_cbf, h_cbf = self._extract_cbf_constraints(ranges, angles)
+        # 1. Trích xuất các ràng buộc Ackermann Kinematic CBF từ LiDAR
+        G_cbf, h_cbf = self._extract_cbf_constraints(v_nom, ranges, angles)
 
         # Nếu phía trước không có vật cản gần -> Giữ nguyên u_nominal
         if G_cbf is None or len(G_cbf) == 0:
@@ -92,7 +100,6 @@ class CBFQPSafetyFilter:
             v, steer, slack = x[0], x[1], x[2]
             return np.array([v - v_nom, 5.0 * (steer - delta_nom), self.slack_weight * slack])
 
-        # Constraint: h - G * x >= 0
         constraints = ({
             'type': 'ineq',
             'fun': lambda x: h - np.dot(G, x),
@@ -114,11 +121,13 @@ class CBFQPSafetyFilter:
             delta_safe = float(np.clip(res.x[1], -self.steer_max, self.steer_max))
             return np.array([v_safe, delta_safe], dtype=np.float32)
 
-        # Fallback khẩn cấp nếu SciPy không hội tụ: Cho v_safe chạy chậm vừa đủ (0.3 m/s) để xe không chết dí
         return np.array([max(0.2, min(v_nom * 0.3, self.v_max)), delta_nom], dtype=np.float32)
 
-    def _extract_cbf_constraints(self, ranges: np.ndarray, angles: np.ndarray):
-        """Tạo ma trận G và vector h cho bất đẳng thức G * x <= h từ dữ liệu LiDAR"""
+    def _extract_cbf_constraints(self, v_nom: float, ranges: np.ndarray, angles: np.ndarray):
+        """
+        Tạo ma trận G và vector h cho bất đẳng thức G * x <= h
+        từ Động học Ackermann & Quán tính Phanh Vật lý.
+        """
         mask_front = (angles >= -self.fov_cutoff_rad) & (angles <= self.fov_cutoff_rad)
         valid_ranges = ranges[mask_front]
         valid_angles = angles[mask_front]
@@ -136,17 +145,26 @@ class CBFQPSafetyFilter:
         G_list = []
         h_list = []
 
+        v_curr = max(0.5, v_nom)
+
         for idx in danger_indices:
             r_i = float(valid_ranges[idx])
             phi_i = float(valid_angles[idx])
 
-            # Hàm Barrier: h_i = r_i - d_min >= 0
-            h_val = r_i - self.d_min
+            # 1. Quãng đường trôi quán tính phanh vật lý: d_brake = (v * cos(phi_i))^2 / (2 * a_brake)
+            d_brake = (v_curr * math.cos(phi_i))**2 / (2.0 * self.a_max_brake)
 
-            # Đạo hàm: dh_i/dt = -v * cos(phi_i)
-            # CBF Constraint: -v * cos(phi_i) + gamma * h_val >= -slack
-            # <=> v * cos(phi_i) - slack <= gamma * (r_i - d_min)
-            G_list.append([math.cos(phi_i), 0.0, -1.0])
-            h_list.append(self.gamma * h_val)
+            # 2. Hàm Barrier Động Học: h_i = r_i - d_min - d_brake >= 0
+            h_val = r_i - self.d_min - d_brake
+
+            # 3. Đạo hàm theo mô hình Ackermann Kinematics:
+            # - Tốc độ lao thẳng tiến: v * cos(phi_i)
+            # - Tốc độ lượn vòng bẻ lái Ackermann: (v / L) * tan(delta) * (r_i * sin(phi_i))
+            # Tuyến tính hóa theo [v, delta, slack]:
+            g_v = math.cos(phi_i) * (1.0 + (v_curr * math.cos(phi_i)) / self.a_max_brake)
+            g_steer = -(v_curr / self.wheelbase) * (r_i * math.sin(phi_i))
+
+            G_list.append([g_v, g_steer, -1.0])
+            h_list.append(self.gamma * max(0.01, h_val))
 
         return np.array(G_list), np.array(h_list)

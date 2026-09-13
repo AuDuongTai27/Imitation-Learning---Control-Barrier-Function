@@ -53,3 +53,7 @@ ai_eval_report.html
 .gemini/
 
 # Lưu ý: Thư mục models/ (chứa .onnx, .pth, .json) được giữ lại để đẩy lên GitHub
+
+# Run logs
+**/log_runs/
+*.log

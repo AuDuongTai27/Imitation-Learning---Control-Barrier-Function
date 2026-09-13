@@ -34,10 +34,13 @@ install(PROGRAMS
   pure_pursuit_controller/data_collection/data_collection_sim_90.py
   pure_pursuit_controller/data_collection/data_collection_real.py
   pure_pursuit_controller/data_collection/dagger_rrt_collector.py
+  pure_pursuit_controller/data_collection/calibrate_braking_accel.py
 
   # CBF Safety Filter
   pure_pursuit_controller/cbf/cbf_safety_filter_node.py
+  pure_pursuit_controller/cbf/cbf_smooth_safety_filter_node.py
   pure_pursuit_controller/cbf/cbf_core.py
+  pure_pursuit_controller/cbf/cbf_live_plotter.py
 
   # Obstacle Spawners
   pure_pursuit_controller/obstacles/auto_obstacle_spawner.py
